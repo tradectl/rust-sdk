@@ -1,0 +1,23 @@
+[package]
+name = "tradectl-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Crypto trading strategy SDK — types, traits, exchange abstractions"
+
+[features]
+default = []
+monitor = ["tokio-tungstenite", "futures-util", "tokio/net", "tokio/rt", "tokio/macros"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync"] }
+log = "0.4"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = true }
+futures-util = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
