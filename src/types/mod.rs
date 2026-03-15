@@ -6,6 +6,7 @@ mod params;
 mod pair_info;
 mod market_data;
 pub mod profit;
+pub mod config;
 
 pub use enums::*;
 pub use events::*;

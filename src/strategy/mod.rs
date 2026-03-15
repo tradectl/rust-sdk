@@ -8,7 +8,7 @@ pub enum Action {
     /// Place a limit order.
     LimitOpen { side: Side, price: f64, size: Option<f64> },
     /// Close a specific position at market.
-    ClosePosition { position_id: u64 },
+    ClosePosition { position_id: u64, reason: CloseReason },
     /// Close all positions at market.
     CloseAll,
     /// Cancel pending limit order.

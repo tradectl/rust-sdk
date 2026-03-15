@@ -8,22 +8,7 @@ use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Monitor configuration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
-pub struct MonitorConfig {
-    pub host: String,
-    pub port: u16,
-}
-
-impl Default for MonitorConfig {
-    fn default() -> Self {
-        Self {
-            host: "0.0.0.0".into(),
-            port: 9100,
-        }
-    }
-}
+pub use crate::types::config::MonitorConfig;
 
 /// Full strategy state snapshot, broadcast on every tick.
 #[derive(serde::Serialize, Clone)]
