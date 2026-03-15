@@ -33,7 +33,7 @@ pub type StrategyFactory = fn(&StratEntry) -> Box<dyn Strategy>;
 /// Entry point for paper trading. Loads config from CLI arg (or default path),
 /// creates the strategy via factory, and runs the paper trading loop.
 ///
-/// ```no_run
+/// ```ignore
 /// tradectl_sdk::paper::run("config.json", |strat| {
 ///     Box::new(MyStrategy::from_config(strat))
 /// });
