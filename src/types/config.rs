@@ -50,6 +50,9 @@ pub struct TelegramConfig {
 fn default_send_interval() -> u64 { 10 }
 
 /// Exchange API credentials.
+///
+/// Binance/Bybit: `key` + `secret` (standard API key pair).
+/// Hyperliquid: `wallet_address` + `private_key` (on-chain wallet auth).
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiConfig {
@@ -59,6 +62,12 @@ pub struct ApiConfig {
     pub key: String,
     #[serde(default)]
     pub secret: String,
+    /// Hyperliquid wallet address (0x...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
+    /// Hyperliquid private key for signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -67,6 +76,8 @@ impl Default for ApiConfig {
             provider: default_provider(),
             key: String::new(),
             secret: String::new(),
+            wallet_address: None,
+            private_key: None,
         }
     }
 }
@@ -106,6 +117,12 @@ pub struct StratEntry {
     #[serde(default)]
     pub is_emulator: bool,
     pub pairs: Vec<String>,
+    /// Strategy source: `"marketplace"` or `"local"` (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Pinned marketplace version. Omitted = latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// Strategy-specific parameters (variable per strategy type).
     #[serde(flatten)]
     pub params: HashMap<String, serde_json::Value>,

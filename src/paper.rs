@@ -27,9 +27,6 @@ impl Position {
     }
 }
 
-/// Strategy factory: receives strategy config, returns a boxed strategy.
-pub type StrategyFactory = fn(&StratEntry) -> Box<dyn Strategy>;
-
 /// Entry point for paper trading. Loads config from CLI arg (or default path),
 /// creates the strategy via factory, and runs the paper trading loop.
 ///
@@ -38,14 +35,10 @@ pub type StrategyFactory = fn(&StratEntry) -> Box<dyn Strategy>;
 ///     Box::new(MyStrategy::from_config(strat))
 /// });
 /// ```
-pub fn run(default_config: &str, factory: StrategyFactory) {
+pub fn run(config_path: &str, factory: impl FnOnce(&StratEntry) -> Box<dyn Strategy>) {
     runner::init_logging();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| default_config.to_string());
-
-    let raw = std::fs::read_to_string(&config_path)
+    let raw = std::fs::read_to_string(config_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", config_path, e));
 
     let config: BotConfig = serde_json::from_str(&raw)
