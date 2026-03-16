@@ -4,6 +4,7 @@
 //! No API keys needed. Read-only market data, simulated execution.
 
 use crate::monitor::*;
+use crate::reporter::{TradeReporter, TradeReport};
 use crate::runner;
 use crate::strategy::*;
 use crate::types::*;
@@ -51,8 +52,12 @@ pub fn run(config_path: &str, factory: impl FnOnce(&StratEntry) -> Box<dyn Strat
 
     let mut strategy = factory(strat);
 
+    // Derive strategy key from crate name for trade reporting
+    let strategy_key = strat.strategy_type.to_lowercase().replace('_', "-");
+    let reporter = TradeReporter::new(&strategy_key);
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    if let Err(e) = rt.block_on(run_paper(&config, strat, strategy.as_mut())) {
+    if let Err(e) = rt.block_on(run_paper(&config, strat, strategy.as_mut(), reporter.as_ref())) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
@@ -62,6 +67,7 @@ async fn run_paper(
     config: &BotConfig,
     strat: &StratEntry,
     strategy: &mut dyn Strategy,
+    reporter: Option<&TradeReporter>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let symbol = strat
         .pairs
@@ -80,13 +86,7 @@ async fn run_paper(
     runner::log_monitor(&monitor_config.host, monitor_config.port);
     runner::log_startup(&strat.name, mode, &all_pairs);
 
-    // Connect to exchange WS
     let url = ws_url(&exchange, &symbol);
-    log::info!("connecting to {}...", url);
-    let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
-    runner::log_connected(&config.api.provider, 10_000.0, &all_pairs.join(", "));
-
-    let (_, mut read) = ws.split();
 
     let mut positions: Vec<Position> = Vec::new();
     let mut next_id: u64 = 1;
@@ -96,147 +96,179 @@ async fn run_paper(
     let mut realized_pnl = 0.0_f64;
     let strategy_name = strat.name.clone();
 
-    while let Some(msg) = read.next().await {
-        let text = match msg? {
-            tungstenite::Message::Text(t) => t,
-            _ => continue,
+    loop {
+        // Connect to exchange WS
+        log::info!("connecting to {}...", url);
+        let ws = match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _)) => ws,
+            Err(e) => {
+                log::warn!("ws connect failed: {e}, retrying...");
+                continue;
+            }
         };
+        runner::log_connected(&config.api.provider, balance, &all_pairs.join(", "));
 
-        let (bid, ask, bid_qty, ask_qty, timestamp) =
-            match parse_book_ticker(&exchange, &text) {
-                Some(v) => v,
-                None => continue,
+        let (_, mut read) = ws.split();
+
+        while let Some(msg) = read.next().await {
+            let text = match msg {
+                Ok(tungstenite::Message::Text(t)) => t,
+                Ok(_) => continue,
+                Err(e) => {
+                    log::warn!("ws error: {e}, reconnecting...");
+                    break;
+                }
             };
 
-        let ticker = TickerEvent {
-            bid_price: bid,
-            bid_qty,
-            ask_price: ask,
-            ask_qty,
-            timestamp_ms: timestamp,
-        };
-
-        let mid = (bid + ask) * 0.5;
-
-        // Pre-action context for strategy decision
-        let tuples: Vec<_> = positions.iter().map(|p| p.as_tuple()).collect();
-        let position_infos = runner::build_position_infos(&tuples, mid);
-        let unrealized: f64 = position_infos.iter().map(|p| p.unrealized_pnl).sum();
-        let ctx = StrategyContext {
-            timestamp_ms: timestamp,
-            book: Some(&ticker),
-            positions: &position_infos,
-            balance,
-            unrealized_pnl: unrealized,
-            realized_pnl,
-            trade_count,
-        };
-
-        let action = strategy.on_ticker(&ticker, &ctx);
-        drop(position_infos);
-
-        match action {
-            Action::MarketOpen { side, size } => {
-                let quantity = size.unwrap_or(order_size);
-                let entry_price = match side {
-                    Side::Long => ask,
-                    Side::Short => bid,
+            let (bid, ask, bid_qty, ask_qty, timestamp) =
+                match parse_book_ticker(&exchange, &text) {
+                    Some(v) => v,
+                    None => continue,
                 };
-                let side_str = match side {
-                    Side::Long => "BUY",
-                    Side::Short => "SELL",
-                };
-                let order_id = runner::gen_order_id(timestamp, &mut order_seq);
 
-                runner::log_placing(
-                    &order_id, &strategy_name, &symbol,
-                    side_str, "MARKET", quantity,
-                    &format!(" @ {:.2}", entry_price),
-                );
-                runner::log_filled(
-                    &order_id, &strategy_name, &symbol,
-                    side_str, quantity, entry_price,
-                );
-                runner::log_processing(
-                    &order_id, &strategy_name, &symbol,
-                    "entry", "Filled",
-                );
+            let ticker = TickerEvent {
+                bid_price: bid,
+                bid_qty,
+                ask_price: ask,
+                ask_qty,
+                timestamp_ms: timestamp,
+            };
 
-                monitor.broadcast(&MonitorEvent::Fill(MonitorFill {
-                    timestamp_ms: timestamp,
-                    strategy_name: strategy_name.clone(),
-                    symbol: symbol.clone(),
-                    side: format!("{:?}", side),
-                    price: entry_price,
-                    quantity,
-                    fill_type: "entry".into(),
-                    profit_pct: None,
-                    profit_usd: None,
-                }));
+            let mid = (bid + ask) * 0.5;
 
-                positions.push(Position {
-                    order_id,
-                    id: next_id,
-                    side,
-                    entry_price,
-                    quantity,
-                    entry_time: timestamp,
-                });
-                next_id += 1;
-            }
+            // Pre-action context for strategy decision
+            let tuples: Vec<_> = positions.iter().map(|p| p.as_tuple()).collect();
+            let position_infos = runner::build_position_infos(&tuples, mid);
+            let unrealized: f64 = position_infos.iter().map(|p| p.unrealized_pnl).sum();
+            let ctx = StrategyContext {
+                timestamp_ms: timestamp,
+                book: Some(&ticker),
+                positions: &position_infos,
+                balance,
+                unrealized_pnl: unrealized,
+                realized_pnl,
+                trade_count,
+            };
 
-            Action::ClosePosition { position_id, reason } => {
-                close_position(
-                    &mut positions, position_id, reason, bid, ask, timestamp,
-                    &symbol, &strategy_name, &mut balance, &mut realized_pnl,
-                    &mut trade_count, &ticker, strategy, &monitor,
-                );
-            }
+            let action = strategy.on_ticker(&ticker, &ctx);
+            drop(position_infos);
 
-            Action::CloseAll => {
-                let ids: Vec<u64> = positions.iter().map(|p| p.id).collect();
-                for id in ids {
+            match action {
+                Action::MarketOpen { side, size } => {
+                    let quantity = size.unwrap_or(order_size);
+                    let entry_price = match side {
+                        Side::Long => ask,
+                        Side::Short => bid,
+                    };
+                    let side_str = match side {
+                        Side::Long => "BUY",
+                        Side::Short => "SELL",
+                    };
+                    let order_id = runner::gen_order_id(timestamp, &mut order_seq);
+
+                    runner::log_placing(
+                        &order_id, &strategy_name, &symbol,
+                        side_str, "MARKET", quantity,
+                        &format!(" @ {:.2}", entry_price),
+                    );
+                    runner::log_filled(
+                        &order_id, &strategy_name, &symbol,
+                        side_str, quantity, entry_price,
+                    );
+                    runner::log_processing(
+                        &order_id, &strategy_name, &symbol,
+                        "entry", "Filled",
+                    );
+
+                    monitor.broadcast(&MonitorEvent::Fill(MonitorFill {
+                        timestamp_ms: timestamp,
+                        strategy_name: strategy_name.clone(),
+                        symbol: symbol.clone(),
+                        side: format!("{:?}", side),
+                        price: entry_price,
+                        quantity,
+                        fill_type: "entry".into(),
+                        profit_pct: None,
+                        profit_usd: None,
+                    }));
+
+                    if let Some(r) = reporter {
+                        r.report(TradeReport {
+                            symbol: symbol.clone(),
+                            side: side_str.into(),
+                            quantity: format!("{quantity}"),
+                            price: format!("{entry_price}"),
+                            pnl: None,
+                            source: "paper".into(),
+                            executed_at: ts_to_iso(timestamp),
+                        });
+                    }
+
+                    positions.push(Position {
+                        order_id,
+                        id: next_id,
+                        side,
+                        entry_price,
+                        quantity,
+                        entry_time: timestamp,
+                    });
+                    next_id += 1;
+                }
+
+                Action::ClosePosition { position_id, reason } => {
                     close_position(
-                        &mut positions, id, CloseReason::ForceClose, bid, ask, timestamp,
+                        &mut positions, position_id, reason, bid, ask, timestamp,
                         &symbol, &strategy_name, &mut balance, &mut realized_pnl,
-                        &mut trade_count, &ticker, strategy, &monitor,
+                        &mut trade_count, &ticker, strategy, &monitor, reporter,
                     );
                 }
+
+                Action::CloseAll => {
+                    let ids: Vec<u64> = positions.iter().map(|p| p.id).collect();
+                    for id in ids {
+                        close_position(
+                            &mut positions, id, CloseReason::ForceClose, bid, ask, timestamp,
+                            &symbol, &strategy_name, &mut balance, &mut realized_pnl,
+                            &mut trade_count, &ticker, strategy, &monitor, reporter,
+                        );
+                    }
+                }
+
+                _ => {}
             }
 
-            _ => {}
+            // Post-action context for monitor snapshot
+            let tuples: Vec<_> = positions.iter().map(|p| p.as_tuple()).collect();
+            let position_infos = runner::build_position_infos(&tuples, mid);
+            let unrealized: f64 = position_infos.iter().map(|p| p.unrealized_pnl).sum();
+            let ctx = StrategyContext {
+                timestamp_ms: timestamp,
+                book: Some(&ticker),
+                positions: &position_infos,
+                balance,
+                unrealized_pnl: unrealized,
+                realized_pnl,
+                trade_count,
+            };
+
+            let snapshot = strategy.monitor_snapshot(&ctx, &ticker);
+            monitor.broadcast(&MonitorEvent::Tick(MonitorTick {
+                timestamp_ms: timestamp,
+                strategy_name: strategy_name.clone(),
+                mode: mode.into(),
+                symbol: symbol.clone(),
+                bid_price: bid,
+                ask_price: ask,
+                balance,
+                trade_count,
+                price_lines: snapshot.price_lines,
+                strategy_state: snapshot.state,
+            }));
         }
 
-        // Post-action context for monitor snapshot
-        let tuples: Vec<_> = positions.iter().map(|p| p.as_tuple()).collect();
-        let position_infos = runner::build_position_infos(&tuples, mid);
-        let unrealized: f64 = position_infos.iter().map(|p| p.unrealized_pnl).sum();
-        let ctx = StrategyContext {
-            timestamp_ms: timestamp,
-            book: Some(&ticker),
-            positions: &position_infos,
-            balance,
-            unrealized_pnl: unrealized,
-            realized_pnl,
-            trade_count,
-        };
-
-        let snapshot = strategy.monitor_snapshot(&ctx, &ticker);
-        monitor.broadcast(&MonitorEvent::Tick(MonitorTick {
-            timestamp_ms: timestamp,
-            strategy_name: strategy_name.clone(),
-            mode: mode.into(),
-            symbol: symbol.clone(),
-            bid_price: bid,
-            ask_price: ask,
-            balance,
-            trade_count,
-            price_lines: snapshot.price_lines,
-            strategy_state: snapshot.state,
-        }));
+        // Connection dropped — reconnect immediately
+        log::warn!("ws disconnected, reconnecting...");
     }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +287,7 @@ fn close_position(
     ticker: &TickerEvent,
     strategy: &mut dyn Strategy,
     monitor: &MonitorBroadcaster,
+    reporter: Option<&TradeReporter>,
 ) {
     let idx = match positions.iter().position(|p| p.id == position_id) {
         Some(i) => i,
@@ -340,6 +373,26 @@ fn close_position(
         profit_pct: Some(pnl_pct),
         profit_usd: Some(pnl_usd),
     }));
+
+    if let Some(r) = reporter {
+        r.report(TradeReport {
+            symbol: symbol.into(),
+            side: close_side.into(),
+            quantity: format!("{}", pos.quantity),
+            price: format!("{close_price}"),
+            pnl: Some(format!("{pnl_usd:.4}")),
+            source: "paper".into(),
+            executed_at: ts_to_iso(timestamp),
+        });
+    }
+}
+
+fn ts_to_iso(ms: u64) -> String {
+    let secs = (ms / 1000) as i64;
+    let nanos = ((ms % 1000) * 1_000_000) as u32;
+    let dt = chrono::DateTime::from_timestamp(secs, nanos)
+        .unwrap_or_default();
+    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 // --- Exchange WebSocket helpers ---
