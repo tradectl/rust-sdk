@@ -26,6 +26,10 @@ impl Params {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &f64)> {
         self.values.iter()
     }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.values.keys()
+    }
 }
 
 /// Parameter definition for UI/validation/sweep ranges.

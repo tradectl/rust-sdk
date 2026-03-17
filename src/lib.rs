@@ -4,10 +4,6 @@ pub mod exchange;
 pub mod runner;
 #[cfg(feature = "monitor")]
 pub mod monitor;
-#[cfg(feature = "paper")]
-pub mod paper;
-#[cfg(feature = "paper")]
-pub mod reporter;
 #[cfg(feature = "runner")]
 mod run_cli;
 

@@ -7,7 +7,6 @@ description = "Crypto trading strategy SDK — types, traits, exchange abstracti
 [features]
 default = []
 monitor = ["tokio-tungstenite", "futures-util", "tokio/net", "tokio/rt", "tokio/macros"]
-paper = ["monitor", "tokio/rt-multi-thread", "ureq"]
 runner = ["clap"]
 
 [dependencies]
@@ -20,7 +19,6 @@ log = "0.4"
 tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = true }
 futures-util = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
-ureq = { version = "3", features = ["json"], optional = true }
 simplelog = "0.12"
 time = { version = "0.3", features = ["macros"] }
 
