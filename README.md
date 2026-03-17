@@ -8,7 +8,7 @@ This crate provides the core types, traits, and exchange abstractions that strat
 
 ```toml
 [dependencies]
-tradectl-sdk = { git = "https://github.com/nicenemo/tradectl-sdk" }
+tradectl-sdk = { git = "https://github.com/tradectl/rust-sdk" }
 ```
 
 ```rust
@@ -94,6 +94,35 @@ use tradectl_sdk::monitor::*;
 let broadcaster = MonitorBroadcaster::start(&MonitorConfig::default()).await?;
 broadcaster.broadcast(&MonitorEvent::Tick(MonitorTick { /* ... */ }));
 ```
+
+## AI Integration (MCP)
+
+tradectl exposes an [MCP](https://modelcontextprotocol.io) endpoint so AI coding assistants can interact with the platform directly — query strategies, run backtests, check trades, and publish to the marketplace from within a conversation.
+
+```bash
+# Connect Claude Code to your tradectl account
+claude mcp add --transport http tradectl https://tradectl.com/mcp \
+  --header "Authorization: Bearer st_live_YOUR_API_KEY"
+
+# Or for local dev
+claude mcp add --transport http tradectl-dev http://localhost:3001/mcp \
+  --header "Authorization: Bearer st_live_YOUR_API_KEY"
+```
+
+Generate an API key at **tradectl.com → Account → API Keys** or via the CLI:
+```bash
+tradectl api-key create
+```
+
+Once connected, your AI assistant can:
+
+- List strategies and their performance
+- Run backtests and check results
+- Query trade history with filters
+- Publish strategies to the marketplace
+- Check deployments and portfolio
+
+See [MCP.md](../MCP.md) for the full tool reference.
 
 ## Dependencies
 
