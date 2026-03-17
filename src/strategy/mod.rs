@@ -123,3 +123,50 @@ pub trait Strategy: Send {
 
 /// Factory function type for creating strategy instances from parameters.
 pub type StrategyFactory = fn(&Params) -> Box<dyn Strategy>;
+
+/// ABI-stable struct returned by strategy dylibs.
+///
+/// The CLI loads a `.so`/`.dylib`, calls the exported `tradectl_strategy()`
+/// function, and gets this struct containing the strategy name and factory.
+#[repr(C)]
+pub struct StrategyPlugin {
+    /// ABI version — bump on breaking changes to the Strategy trait.
+    pub abi_version: u32,
+    /// Pointer to the strategy name (UTF-8 bytes).
+    pub name: *const u8,
+    /// Length of the strategy name in bytes.
+    pub name_len: usize,
+    /// Factory function that creates strategy instances from parameters.
+    pub factory: StrategyFactory,
+}
+
+/// Current ABI version for strategy plugins.
+pub const STRATEGY_ABI_VERSION: u32 = 1;
+
+// Safety: StrategyPlugin is constructed at load time and used from a single thread.
+unsafe impl Send for StrategyPlugin {}
+unsafe impl Sync for StrategyPlugin {}
+
+/// Declare this crate as a tradectl strategy plugin.
+///
+/// Call once in your `lib.rs`:
+/// ```rust,ignore
+/// tradectl_sdk::declare_strategy!("moonshot", Moonshot::new);
+/// ```
+///
+/// This exports a C-compatible entry point that the `tradectl` CLI loads at runtime.
+#[macro_export]
+macro_rules! declare_strategy {
+    ($name:expr, $factory:expr) => {
+        #[no_mangle]
+        pub extern "C" fn tradectl_strategy() -> $crate::strategy::StrategyPlugin {
+            const NAME: &[u8] = $name.as_bytes();
+            $crate::strategy::StrategyPlugin {
+                abi_version: $crate::strategy::STRATEGY_ABI_VERSION,
+                name: NAME.as_ptr(),
+                name_len: NAME.len(),
+                factory: |params| ::std::boxed::Box::new($factory(params)),
+            }
+        }
+    };
+}

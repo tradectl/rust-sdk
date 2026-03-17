@@ -274,58 +274,8 @@ pub fn run_with_handler(handler: impl FnOnce(RunCommand)) {
     }
 }
 
-#[allow(unused_variables)]
-fn run_live(args: RunArgs, factory: StrategyFactory) {
-    let raw = std::fs::read_to_string(&args.config).unwrap_or_else(|e| {
-        eprintln!("Failed to read config {}: {e}", args.config.display());
-        std::process::exit(1);
-    });
-
-    let config: crate::types::config::BotConfig =
-        serde_json::from_str(&raw).unwrap_or_else(|e| {
-            eprintln!("Invalid config: {e}");
-            std::process::exit(1);
-        });
-
-    let all_paper = config.strats.iter().all(|s| s.is_emulator);
-
-    if all_paper {
-        #[cfg(feature = "paper")]
-        {
-            crate::paper::run(&args.config.to_string_lossy(), |strat| {
-                let params = strat_entry_to_params(strat);
-                factory(&params)
-            });
-            return;
-        }
-
-        #[cfg(not(feature = "paper"))]
-        {
-            eprintln!("Paper trading requires the 'paper' feature.");
-            eprintln!(
-                "Add to Cargo.toml: tradectl-sdk = {{ ..., features = [\"runner\", \"paper\"] }}"
-            );
-            std::process::exit(1);
-        }
-    } else {
-        eprintln!("Live trading mode requires the tradectl-live runner.");
-        eprintln!("This will be integrated in a future release.");
-        std::process::exit(1);
-    }
-
-    #[allow(unreachable_code)]
-    {
-        let _ = config;
-    }
-}
-
-#[cfg(feature = "paper")]
-fn strat_entry_to_params(strat: &crate::types::config::StratEntry) -> Params {
-    let mut params = Params::new();
-    for (key, value) in &strat.params {
-        if let Some(v) = value.as_f64() {
-            params = params.set(key, v);
-        }
-    }
-    params
+fn run_live(_args: RunArgs, _factory: StrategyFactory) {
+    eprintln!("Direct run mode is handled by the tradectl-live runner.");
+    eprintln!("Use `tradectl run --config <config.json>` instead.");
+    std::process::exit(1);
 }
