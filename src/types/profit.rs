@@ -55,6 +55,7 @@ fn direction(side: OrderSide) -> f64 {
 /// Returns ROI % as `profit`, net PnL in USD as `profit_usd`, and total fees.
 pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
     if p.leverage <= 0.0 {
+        log::warn!("linear profit: invalid leverage {}, returning zero", p.leverage);
         return ProfitResult::default();
     }
     let dir = direction(p.side);
@@ -91,9 +92,14 @@ pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
 /// PnL is computed in coin terms, then converted to USD at exit price.
 pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
     if p.entry_price <= 0.0 || p.exit_price <= 0.0 {
+        log::warn!(
+            "inverse profit: invalid prices (entry={}, exit={}), returning zero",
+            p.entry_price, p.exit_price
+        );
         return ProfitResult::default();
     }
     if p.leverage <= 0.0 {
+        log::warn!("inverse profit: invalid leverage {}, returning zero", p.leverage);
         return ProfitResult::default();
     }
     let dir = direction(p.side);
