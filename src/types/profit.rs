@@ -6,7 +6,7 @@ pub struct MarketFees {
     pub taker_rate: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ProfitResult {
     /// ROI % accounting for leverage (net_pnl / initial_margin).
     pub profit: f64,
@@ -87,6 +87,9 @@ pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
 ///
 /// PnL is computed in coin terms, then converted to USD at exit price.
 pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
+    if p.entry_price <= 0.0 || p.exit_price <= 0.0 {
+        return ProfitResult::default();
+    }
     let dir = direction(p.side);
     let inv_entry = 1.0 / p.entry_price;
     let inv_exit = 1.0 / p.exit_price;
