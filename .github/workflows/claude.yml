@@ -28,10 +28,6 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-<<<<<<< Updated upstream
-          claude_args: "--max-turns 5"
-          review_on_open: "true"
-=======
           claude_args: >-
             --max-turns 15
             --allowedTools Bash
@@ -48,4 +44,3 @@ jobs:
 
             Use `gh pr diff ${{ github.event.pull_request.number }}` to see changes.
             Use `gh pr comment` to post your review summary.
->>>>>>> Stashed changes
