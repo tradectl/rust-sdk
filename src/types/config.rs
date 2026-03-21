@@ -103,6 +103,9 @@ pub struct LogConfig {
     pub path: String,
     pub mode: String,
     pub level: String,
+    /// Disable timestamps in log output (useful for deterministic replay logs).
+    #[serde(default)]
+    pub no_timestamp: bool,
 }
 
 /// A single strategy entry in the `strats` array.

@@ -13,7 +13,7 @@ pub fn setup_logging(config: &Option<crate::types::config::LogConfig>) {
     use simplelog::*;
     use time::macros::format_description;
 
-    let (level, mode, path) = match config {
+    let (level, mode, path, no_timestamp) = match config {
         Some(cfg) => {
             let level = match cfg.level.to_lowercase().as_str() {
                 "trace" => LevelFilter::Trace,
@@ -23,16 +23,20 @@ pub fn setup_logging(config: &Option<crate::types::config::LogConfig>) {
                 "error" => LevelFilter::Error,
                 _ => LevelFilter::Info,
             };
-            (level, cfg.mode.as_str(), Some(&cfg.path))
+            (level, cfg.mode.as_str(), Some(&cfg.path), cfg.no_timestamp)
         }
-        None => (LevelFilter::Info, "console", None),
+        None => (LevelFilter::Info, "console", None, false),
     };
 
-    let log_config = ConfigBuilder::new()
-        .set_time_format_custom(format_description!(
+    let mut builder = ConfigBuilder::new();
+    if no_timestamp {
+        builder.set_time_level(LevelFilter::Off);
+    } else {
+        builder.set_time_format_custom(format_description!(
             "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
-        ))
-        .build();
+        ));
+    }
+    let log_config = builder.build();
 
     let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
 
@@ -72,14 +76,44 @@ pub fn gen_order_id(timestamp_ms: u64, seq: &mut u64) -> String {
     format!("p{}{:04}", timestamp_ms, *seq)
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global data timestamp (ms). Updated by the runner on every event.
+/// When `noTimestamp` is set, `simplelog` omits its wall-clock timestamp,
+/// and log messages can include this instead for deterministic replay logs.
+static DATA_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Set the current data timestamp (called by the runner on every event).
+pub fn set_data_timestamp(ms: u64) {
+    DATA_TIMESTAMP_MS.store(ms, Ordering::Relaxed);
+}
+
+/// Format a millisecond timestamp as ISO 8601 (e.g. `2025-01-12T10:30:45.123Z`).
+pub fn format_data_ts() -> String {
+    let ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
+    if ms == 0 { return String::new(); }
+    let secs = (ms / 1000) as i64;
+    let nanos = ((ms % 1000) * 1_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, nanos)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .unwrap_or_else(|| format!("{}ms", ms))
+}
+
 // ── Shared log functions ────────────────────────────────────────────
 //
 // Both the LoggingAdapter and paper runner call these so that the
 // format is defined once.
 
-/// Core order log: `[cid][name/symbol] message`.
+/// Core order log: `[timestamp] [cid][name/symbol] message`.
+/// Uses data timestamp when set (replay mode), omits it otherwise.
 pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
-    log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
+    let ts = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
+    if ts > 0 {
+        let ts_str = format_data_ts();
+        log::info!("[{}] [{}][{}/{}] {}", ts_str, cid, name, symbol, msg);
+    } else {
+        log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
+    }
 }
 
 /// `[cid][name/symbol] placing SIDE TYPE qty …`
