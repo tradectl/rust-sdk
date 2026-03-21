@@ -339,8 +339,16 @@ impl MarketAdapter for TestExchange {
                         t.bid_price
                     }
                 })
-                .or(request.price)
-                .unwrap_or(0.0);
+                .or(request.price);
+            let fill_price = match fill_price {
+                Some(p) if p > 0.0 => p,
+                _ => {
+                    return Err(format!(
+                        "no fill price for market order on {} — call set_book_ticker first",
+                        request.symbol
+                    ).into());
+                }
+            };
             order.execution_price = fill_price;
             order.filled_quantity = request.quantity;
             self.notify_order_update(&order);
@@ -715,5 +723,27 @@ mod tests {
 
         let pair2 = ex.load_pair("BTCUSDT").await.unwrap();
         assert_eq!(pair2.symbol, pair.symbol);
+    }
+
+    #[tokio::test]
+    async fn market_order_without_book_ticker_errors() {
+        let mut ex = exchange();
+        // No set_book_ticker — market order should fail
+        let result = ex
+            .place_order(&OrderRequest {
+                symbol: "ETHUSDT".into(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Market,
+                quantity: 1.0,
+                price: None,
+                stop_price: None,
+                time_in_force: None,
+                client_order_id: None,
+                reduce_only: None,
+            })
+            .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no fill price"), "error: {msg}");
     }
 }
