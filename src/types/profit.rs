@@ -58,6 +58,15 @@ pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
         log::warn!("linear profit: invalid leverage {}, returning zero", p.leverage);
         return ProfitResult::default();
     }
+    if p.quantity <= 0.0 || p.entry_price <= 0.0 {
+        return ProfitResult::default();
+    }
+    if p.fees.maker_rate < 0.0 || p.fees.maker_rate >= 1.0
+        || p.fees.taker_rate < 0.0 || p.fees.taker_rate >= 1.0
+    {
+        log::warn!("linear profit: fee rates out of range (maker={}, taker={})", p.fees.maker_rate, p.fees.taker_rate);
+        return ProfitResult::default();
+    }
     let dir = direction(p.side);
     let pnl = dir * p.quantity * (p.exit_price - p.entry_price);
 
@@ -102,6 +111,15 @@ pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
         log::warn!("inverse profit: invalid leverage {}, returning zero", p.leverage);
         return ProfitResult::default();
     }
+    if p.quantity <= 0.0 || p.contract_size <= 0.0 {
+        return ProfitResult::default();
+    }
+    if p.fees.maker_rate < 0.0 || p.fees.maker_rate >= 1.0
+        || p.fees.taker_rate < 0.0 || p.fees.taker_rate >= 1.0
+    {
+        log::warn!("inverse profit: fee rates out of range (maker={}, taker={})", p.fees.maker_rate, p.fees.taker_rate);
+        return ProfitResult::default();
+    }
     let dir = direction(p.side);
     let inv_entry = 1.0 / p.entry_price;
     let inv_exit = 1.0 / p.exit_price;
@@ -142,6 +160,15 @@ pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
 ///
 /// ROI is based on initial position value (quantity * entry_price).
 pub fn calculate_spot_profit(p: &SpotProfitParams) -> ProfitResult {
+    if p.quantity <= 0.0 || p.entry_price <= 0.0 {
+        return ProfitResult::default();
+    }
+    if p.fees.maker_rate < 0.0 || p.fees.maker_rate >= 1.0
+        || p.fees.taker_rate < 0.0 || p.fees.taker_rate >= 1.0
+    {
+        log::warn!("spot profit: fee rates out of range (maker={}, taker={})", p.fees.maker_rate, p.fees.taker_rate);
+        return ProfitResult::default();
+    }
     let dir = direction(p.side);
     let pnl = dir * p.quantity * (p.exit_price - p.entry_price);
 
@@ -275,5 +302,98 @@ mod tests {
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
         assert_eq!(r.fees, 0.0);
+    }
+
+    #[test]
+    fn negative_quantity_returns_default() {
+        let r = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: -1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+    }
+
+    #[test]
+    fn zero_entry_price_returns_default() {
+        let r = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 0.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+    }
+
+    #[test]
+    fn negative_fee_returns_default() {
+        let r = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: MarketFees { maker_rate: -0.1, taker_rate: 0.0004 },
+        });
+        assert_eq!(r.profit, 0.0);
+    }
+
+    #[test]
+    fn inverse_zero_contract_size_returns_default() {
+        let r = calculate_inverse_profit(&InverseProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 100.0,
+            leverage: 10.0,
+            contract_size: 0.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+    }
+
+    #[test]
+    fn spot_negative_entry_returns_default() {
+        let r = calculate_spot_profit(&SpotProfitParams {
+            side: OrderSide::Buy,
+            entry_price: -100.0,
+            exit_price: 110.0,
+            quantity: 10.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+    }
+
+    #[test]
+    fn inverse_zero_quantity_returns_zero() {
+        let r = calculate_inverse_profit(&InverseProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 0.0,
+            leverage: 10.0,
+            contract_size: 100.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+        assert_eq!(r.profit_usd, 0.0);
+    }
+
+    #[test]
+    fn spot_zero_quantity_returns_zero() {
+        let r = calculate_spot_profit(&SpotProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 100.0,
+            exit_price: 110.0,
+            quantity: 0.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+        assert_eq!(r.profit_usd, 0.0);
     }
 }

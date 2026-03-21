@@ -72,6 +72,26 @@ struct BacktestArgs {
     /// Print individual trades
     #[arg(short, long)]
     verbose: bool,
+
+    /// Run performance benchmark
+    #[arg(long)]
+    bench: bool,
+
+    /// Number of measured benchmark runs
+    #[arg(long, default_value_t = 4)]
+    runs: usize,
+
+    /// Number of warmup runs before benchmark
+    #[arg(long, default_value_t = 1)]
+    warmup: usize,
+
+    /// Compare against previous benchmark JSON
+    #[arg(long)]
+    diff: Option<std::path::PathBuf>,
+
+    /// Output benchmark report as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -166,6 +186,11 @@ pub struct BacktestRunArgs {
     pub slippage: f64,
     pub params: Params,
     pub verbose: bool,
+    pub bench: bool,
+    pub runs: usize,
+    pub warmup: usize,
+    pub diff: Option<PathBuf>,
+    pub json: bool,
 }
 
 /// Parsed sweep arguments, exposed for strategy binaries that integrate
@@ -241,7 +266,7 @@ pub fn run_with_handler(handler: impl FnOnce(RunCommand)) {
                 params = params.set(key, *value);
             }
             handler(RunCommand::Backtest(BacktestRunArgs {
-                data: args.data,
+                data: args.data.clone(),
                 balance: args.balance,
                 leverage: args.leverage,
                 taker_fee: args.taker_fee,
@@ -249,6 +274,11 @@ pub fn run_with_handler(handler: impl FnOnce(RunCommand)) {
                 slippage: args.slippage,
                 params,
                 verbose: args.verbose,
+                bench: args.bench,
+                runs: args.runs,
+                warmup: args.warmup,
+                diff: args.diff,
+                json: args.json,
             }));
         }
         CliCommand::Sweep(args) => {
