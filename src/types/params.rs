@@ -19,6 +19,11 @@ impl Params {
         self.values.get(key).copied().unwrap_or(default)
     }
 
+    /// Get a required parameter. Panics with a clear message if missing.
+    pub fn require(&self, key: &str) -> f64 {
+        *self.values.get(key).unwrap_or_else(|| panic!("missing required param: {key}"))
+    }
+
     pub fn contains(&self, key: &str) -> bool {
         self.values.contains_key(key)
     }
