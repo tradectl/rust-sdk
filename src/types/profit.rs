@@ -368,4 +368,32 @@ mod tests {
         });
         assert_eq!(r.profit, 0.0);
     }
+
+    #[test]
+    fn inverse_zero_quantity_returns_zero() {
+        let r = calculate_inverse_profit(&InverseProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 0.0,
+            leverage: 10.0,
+            contract_size: 100.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+        assert_eq!(r.profit_usd, 0.0);
+    }
+
+    #[test]
+    fn spot_zero_quantity_returns_zero() {
+        let r = calculate_spot_profit(&SpotProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 100.0,
+            exit_price: 110.0,
+            quantity: 0.0,
+            fees: TEST_FEES,
+        });
+        assert_eq!(r.profit, 0.0);
+        assert_eq!(r.profit_usd, 0.0);
+    }
 }
