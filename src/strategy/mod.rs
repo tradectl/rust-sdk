@@ -151,7 +151,7 @@ unsafe impl Sync for StrategyPlugin {}
 ///
 /// Call once in your `lib.rs`:
 /// ```rust,ignore
-/// tradectl_sdk::declare_strategy!("moonshot", Moonshot::new);
+/// tradectl_sdk::declare_strategy!("bounce-back", BounceBack::new);
 /// ```
 ///
 /// This exports a C-compatible entry point that the `tradectl` CLI loads at runtime.
