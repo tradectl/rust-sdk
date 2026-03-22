@@ -1,28 +1,120 @@
 use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef};
 
+// ---------------------------------------------------------------------------
+// Order / Exit types
+// ---------------------------------------------------------------------------
+
+/// Whether an entry order is market or limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderKind {
+    Market,
+    Limit,
+}
+
+/// How an exit order executes on the exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitType {
+    /// Limit order — fills at `price` or better. Used for take-profit.
+    Limit,
+    /// Stop-market order — triggers at `price`, fills at market. Used for stop-loss.
+    Stop,
+}
+
+/// A single exit order declared by the strategy.
+///
+/// The runner tracks exits by `id` (strategy-assigned). On `SetExits`, exits
+/// with the same `id` are diffed: unchanged → skip, changed → edit, missing →
+/// cancel, new → place. Already-filled IDs are never re-placed.
+#[derive(Debug, Clone)]
+pub struct ExitOrder {
+    /// Strategy-assigned identifier, e.g. "tp1", "sl".
+    pub id: String,
+    /// Target price (limit price for Limit, trigger price for Stop).
+    pub price: f64,
+    /// Quantity to exit.
+    pub size: f64,
+    /// Execution type (limit or stop-market).
+    pub kind: ExitType,
+    /// Delay in milliseconds before the runner places this order.
+    /// 0 = immediate. Typical SL delay: 3000.
+    pub delay_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Action enum
+// ---------------------------------------------------------------------------
+
+/// Action returned by a strategy to the engine.
+///
+/// The engine (live runner or backtest) executes the action and reports fills
+/// back through `Strategy::on_fill`.
 pub enum Action {
     /// Do nothing.
     Hold,
-    /// Open a market position.
-    MarketOpen { side: Side, size: Option<f64> },
-    /// Place a limit order.
-    LimitOpen { side: Side, price: f64, size: Option<f64> },
-    /// Close a specific position at market.
-    ClosePosition { position_id: u64, reason: CloseReason },
-    /// Close all positions at market.
+
+    // -- Entries --
+
+    /// Place an entry order (market or limit) with optional exit orders.
+    /// Exits are placed after the entry fills (via `on_fill` response or
+    /// directly if declared here).
+    PlaceEntry {
+        side: Side,
+        /// `None` for market orders, `Some(price)` for limit orders.
+        price: Option<f64>,
+        size: f64,
+        kind: OrderKind,
+        /// Exit orders to place after this entry fills.
+        exits: Vec<ExitOrder>,
+    },
+    /// Edit a pending entry order (change price and/or size).
+    EditEntry {
+        order_id: String,
+        price: Option<f64>,
+        size: Option<f64>,
+    },
+    /// Cancel specific entry orders by ID.
+    CancelEntry { order_ids: Vec<String> },
+
+    // -- Exits (declarative + imperative) --
+
+    /// Declarative: replace all exit orders with this set.
+    /// The runner diffs by `ExitOrder.id` — unchanged exits are not touched,
+    /// changed exits are edited, missing exits are cancelled, new exits are
+    /// placed. Already-filled exit IDs are skipped.
+    SetExits { exits: Vec<ExitOrder> },
+    /// Imperative: add a single exit order.
+    AddExit { exit: ExitOrder },
+    /// Imperative: update an existing exit order (matched by `exit.id`).
+    UpdateExit { exit: ExitOrder },
+    /// Imperative: remove an exit order by ID.
+    RemoveExit { id: String },
+
+    // -- Position --
+
+    /// Market-close the full position and cancel all exit orders.
     CloseAll,
-    /// Cancel pending limit order.
-    CancelPending,
 }
 
-/// Read-only snapshot of an open position, provided by the engine.
+// ---------------------------------------------------------------------------
+// Position / context
+// ---------------------------------------------------------------------------
+
+/// Read-only snapshot of the current position on a symbol, provided by the engine.
+///
+/// Follows the Binance position model: one accumulated position per symbol with
+/// weighted-average entry price.
 pub struct PositionInfo {
-    pub id: u64,
     pub side: Side,
-    pub entry_price: f64,
+    /// Weighted-average entry price across all fills.
+    pub avg_entry: f64,
+    /// Current remaining quantity (decreases on exit fills).
     pub quantity: f64,
-    pub unrealized_pnl: f64,
-    pub entry_time: u64,
+    /// Sum of all entry fill quantities (does not decrease on exits).
+    pub total_entered: f64,
+    /// Number of entry fills in this position cycle.
+    pub entry_count: usize,
+    /// Price of the most recent entry fill.
+    pub last_entry_price: f64,
 }
 
 /// Context provided to the strategy on every event.
@@ -37,6 +129,47 @@ pub struct StrategyContext<'a> {
     /// Configured trading direction for this strategy instance.
     pub direction: Side,
 }
+
+// ---------------------------------------------------------------------------
+// Fill event / response
+// ---------------------------------------------------------------------------
+
+/// Information about a filled order, passed to `Strategy::on_fill`.
+///
+/// Covers entry fills, partial exit fills, and full position closes.
+pub struct FillEvent {
+    /// Exchange order ID of the filled order.
+    pub order_id: String,
+    /// Symbol that was filled (e.g. "BTCUSDT").
+    pub symbol: String,
+    /// Fill price.
+    pub price: f64,
+    /// Fill quantity.
+    pub quantity: f64,
+    /// `true` if this fill adds to the position (entry).
+    pub is_entry: bool,
+    /// `true` if the order was only partially filled (more quantity pending).
+    pub is_partial: bool,
+    /// For exit fills: which `ExitOrder.id` triggered this fill.
+    pub exit_id: Option<String>,
+    /// `true` if this fill brought the net position quantity to zero.
+    pub position_closed: bool,
+}
+
+/// Response from `Strategy::on_fill`.
+///
+/// Contains follow-up actions (e.g. `SetExits` after an entry fill) and
+/// whether the runner should send a Telegram notification for this fill.
+pub struct FillResponse {
+    /// Follow-up actions to execute (e.g. set exits, cancel orders).
+    pub actions: Vec<Action>,
+    /// If `true`, the runner sends a default-formatted Telegram notification.
+    pub notify: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Monitor
+// ---------------------------------------------------------------------------
 
 /// A price line to display on the monitor chart.
 /// Strategies return these from `monitor_snapshot` — the runner passes them
@@ -61,29 +194,16 @@ pub struct MonitorSnapshot {
     pub state: serde_json::Value,
 }
 
-/// Reason a position was closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseReason {
-    TakeProfit,
-    StopLoss,
-    ForceClose,
-}
-
-/// Information about a closed position, passed to `Strategy::on_position_close`.
-pub struct CloseInfo {
-    pub symbol: String,
-    pub side: Side,
-    pub entry_price: f64,
-    pub close_price: f64,
-    pub quantity: f64,
-    pub profit_pct: f64,
-    pub profit_usd: f64,
-    pub reason: CloseReason,
-}
+// ---------------------------------------------------------------------------
+// Strategy trait
+// ---------------------------------------------------------------------------
 
 /// Core strategy trait. Strategies implement this to participate in backtesting
-/// and live trading. The engine calls `on_ticker` / `on_trade` and executes
-/// the returned `Action`.
+/// and live trading.
+///
+/// The engine calls `on_ticker` / `on_trade` on every market event and executes
+/// the returned `Action`. When an order fills, the engine calls `on_fill` and
+/// processes the returned `FillResponse` actions.
 pub trait Strategy: Send {
     /// Called on every ticker event. Default: Hold.
     fn on_ticker(&mut self, ticker: &TickerEvent, ctx: &StrategyContext) -> Action {
@@ -95,6 +215,15 @@ pub trait Strategy: Send {
     fn on_trade(&mut self, trade: &TradeEvent, ctx: &StrategyContext) -> Action {
         let _ = (trade, ctx);
         Action::Hold
+    }
+
+    /// Called when an order fills (entry or exit, partial or full).
+    ///
+    /// Return follow-up actions (e.g. `SetExits` after entry) and whether
+    /// the runner should send a Telegram notification.
+    fn on_fill(&mut self, fill: &FillEvent, ctx: &StrategyContext) -> FillResponse {
+        let _ = (fill, ctx);
+        FillResponse { actions: vec![], notify: true }
     }
 
     /// Strategy name (for registry/CLI).
@@ -110,18 +239,16 @@ pub trait Strategy: Send {
         vec![]
     }
 
-    /// Called when a position is closed (TP, SL, or force-close).
-    /// Default: no-op. Override to hook into session management, analytics, etc.
-    fn on_position_close(&mut self, close: &CloseInfo, ctx: &StrategyContext) {
-        let _ = (close, ctx);
-    }
-
     /// Return a monitor snapshot with price lines and arbitrary state.
     /// The engine passes this through to the monitor UI without interpretation.
     fn monitor_snapshot(&self, _ctx: &StrategyContext, _ticker: &TickerEvent) -> MonitorSnapshot {
         MonitorSnapshot::default()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Plugin ABI
+// ---------------------------------------------------------------------------
 
 /// Factory function type for creating strategy instances from parameters.
 pub type StrategyFactory = fn(&Params) -> Box<dyn Strategy>;
@@ -143,7 +270,7 @@ pub struct StrategyPlugin {
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 1;
+pub const STRATEGY_ABI_VERSION: u32 = 2;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}

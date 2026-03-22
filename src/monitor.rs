@@ -39,6 +39,15 @@ pub struct MonitorFill {
     pub fill_type: String,
     pub profit_pct: Option<f64>,
     pub profit_usd: Option<f64>,
+    /// Which ExitOrder.id triggered this fill (for exit fills).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_id: Option<String>,
+    /// Whether this was a partial fill.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_partial: bool,
+    /// Whether this fill closed the position (net qty reached 0).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub position_closed: bool,
 }
 
 /// Tagged event envelope for JSON serialization.
