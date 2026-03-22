@@ -34,6 +34,8 @@ pub struct StrategyContext<'a> {
     pub unrealized_pnl: f64,
     pub realized_pnl: f64,
     pub trade_count: usize,
+    /// Configured trading direction for this strategy instance.
+    pub direction: Side,
 }
 
 /// A price line to display on the monitor chart.

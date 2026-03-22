@@ -38,9 +38,35 @@ pub enum TimeInForce {
     Gtx,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum Side {
     Long,
     Short,
+}
+
+impl<'de> serde::Deserialize<'de> for Side {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.to_uppercase().as_str() {
+            "LONG" => Ok(Side::Long),
+            "SHORT" => Ok(Side::Short),
+            _ => Err(serde::de::Error::unknown_variant(&s, &["LONG", "SHORT"])),
+        }
+    }
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Side::Long => write!(f, "LONG"),
+            Side::Short => write!(f, "SHORT"),
+        }
+    }
+}
+
+impl Default for Side {
+    fn default() -> Self {
+        Side::Long
+    }
 }
 
