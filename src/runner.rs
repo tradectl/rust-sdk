@@ -116,14 +116,15 @@ pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Displa
     }
 }
 
-/// `[cid][name/symbol] placing SIDE TYPE qty …`
-pub fn log_placing(
+/// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
+pub fn log_placed(
     cid: &str, name: &str, symbol: &str,
     side: &str, order_type: &str,
     qty: impl std::fmt::Display, price_str: &str,
+    elapsed_ms: u128,
 ) {
     log_order(cid, name, symbol, format_args!(
-        "placing {} {} {}{}", side, order_type, qty, price_str
+        "[{}ms] placed {} {} {}{}", elapsed_ms, side, order_type, qty, price_str
     ));
 }
 
@@ -137,19 +138,20 @@ pub fn log_filled(
     ));
 }
 
-/// `[cid][name/symbol] editing: price -> X, qty Y`
-pub fn log_editing(
+/// `[cid][name/symbol][Xms] edited: price -> X, qty Y`
+pub fn log_edited(
     cid: &str, name: &str, symbol: &str,
     price: f64, qty_str: &str,
+    elapsed_ms: u128,
 ) {
     log_order(cid, name, symbol, format_args!(
-        "editing: price -> {:.2}{}", price, qty_str
+        "[{}ms] edited: price -> {:.2}{}", elapsed_ms, price, qty_str
     ));
 }
 
-/// `[cid][name/symbol] canceling`
-pub fn log_canceling(cid: &str, name: &str, symbol: &str) {
-    log_order(cid, name, symbol, "canceling");
+/// `[cid][name/symbol][Xms] canceled`
+pub fn log_canceled(cid: &str, name: &str, symbol: &str, elapsed_ms: u128) {
+    log_order(cid, name, symbol, format_args!("[{}ms] canceled", elapsed_ms));
 }
 
 /// `[cid][name/symbol] processing KIND order update: status=STATUS`

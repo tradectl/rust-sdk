@@ -14,7 +14,20 @@ pub struct BotConfig {
     pub db: Option<DbConfig>,
     pub log: Option<LogConfig>,
     pub monitor: Option<MonitorConfig>,
+    pub paper: Option<PaperSettings>,
     pub strats: Vec<StratEntry>,
+}
+
+/// Paper trading emulation settings.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaperSettings {
+    /// Base latency for order operations in milliseconds (default 0).
+    #[serde(default)]
+    pub latency_ms: u64,
+    /// Random jitter range in milliseconds. Actual latency = `latency_ms ± rand(0, jitter_ms)`.
+    #[serde(default)]
+    pub jitter_ms: u64,
 }
 
 /// Monitor WebSocket server settings.
