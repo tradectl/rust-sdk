@@ -210,26 +210,21 @@ pub fn log_monitor(host: &str, port: u16) {
 
 // ── Position tracking ───────────────────────────────────────────────
 
-/// Build PositionInfo snapshots from positions (unrealized PnL in USD).
-pub fn build_position_infos(
-    positions: &[(u64, Side, f64, f64, u64)], // (id, side, entry_price, quantity, entry_time)
-    mid: f64,
-) -> Vec<PositionInfo> {
-    positions
-        .iter()
-        .map(|&(id, side, entry_price, quantity, entry_time)| {
-            let upnl = match side {
-                Side::Long => (mid - entry_price) * quantity,
-                Side::Short => (entry_price - mid) * quantity,
-            };
-            PositionInfo {
-                id,
-                side,
-                entry_price,
-                quantity,
-                unrealized_pnl: upnl,
-                entry_time,
-            }
-        })
-        .collect()
+/// Build a single PositionInfo from accumulated position state.
+pub fn build_position_info(
+    side: Side,
+    avg_entry: f64,
+    quantity: f64,
+    total_entered: f64,
+    entry_count: usize,
+    last_entry_price: f64,
+) -> PositionInfo {
+    PositionInfo {
+        side,
+        avg_entry,
+        quantity,
+        total_entered,
+        entry_count,
+        last_entry_price,
+    }
 }
