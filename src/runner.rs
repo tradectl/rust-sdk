@@ -99,6 +99,25 @@ pub fn format_data_ts() -> String {
         .unwrap_or_else(|| format!("{}ms", ms))
 }
 
+// ── Price formatting ────────────────────────────────────────────────
+
+/// Truncate (not round) a float to 5 decimal places for display.
+/// Trailing zeros stripped but keeps at least 2 decimals:
+/// `108880.38000` → `108880.38`, `94151.50000` → `94151.50`.
+pub fn trunc5(v: f64) -> String {
+    let units = (v.abs() * 100_000.0).trunc() as u64;
+    let whole = units / 100_000;
+    let frac = units % 100_000;
+    let raw = if v < 0.0 && units > 0 {
+        format!("-{}.{:05}", whole, frac)
+    } else {
+        format!("{}.{:05}", whole, frac)
+    };
+    // Keep at least 2 decimal places (trim only positions 3-5)
+    let (head, tail) = raw.split_at(raw.len() - 3);
+    format!("{}{}", head, tail.trim_end_matches('0'))
+}
+
 // ── Shared log functions ────────────────────────────────────────────
 //
 // Both the LoggingAdapter and paper runner call these so that the
@@ -134,7 +153,7 @@ pub fn log_filled(
     side: &str, qty: impl std::fmt::Display, price: f64,
 ) {
     log_order(cid, name, symbol, format_args!(
-        "filled: {} {} @ {:.2}", side, qty, price
+        "filled: {} {} @ {}", side, qty, trunc5(price)
     ));
 }
 
@@ -145,7 +164,7 @@ pub fn log_edited(
     elapsed_ms: u128,
 ) {
     log_order(cid, name, symbol, format_args!(
-        "[{}ms] edited: price -> {:.2}{}", elapsed_ms, price, qty_str
+        "[{}ms] edited: price -> {}{}", elapsed_ms, trunc5(price), qty_str
     ));
 }
 
@@ -171,7 +190,7 @@ pub fn log_sl_scheduled(cid: &str, name: &str, symbol: &str, delay_secs: u64) {
 
 /// `[cid][name/symbol] SL placed @ price`
 pub fn log_sl_placed(cid: &str, name: &str, symbol: &str, price: f64) {
-    log_order(cid, name, symbol, format_args!("SL placed @ {:.2}", price));
+    log_order(cid, name, symbol, format_args!("SL placed @ {}", trunc5(price)));
 }
 
 /// `[name] starting (mode, pairs: ...)`
