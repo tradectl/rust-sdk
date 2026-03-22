@@ -3,6 +3,7 @@
 //! Shared across live runner, paper runner, and CLI.
 
 use std::collections::HashMap;
+use super::enums::Side;
 
 /// Top-level bot configuration.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -129,6 +130,9 @@ pub struct StratEntry {
     #[serde(rename = "type")]
     pub strategy_type: String,
     pub market_type: String,
+    /// Trading direction: `LONG` or `SHORT`. Defaults to `LONG`.
+    #[serde(default)]
+    pub direction: Side,
     /// Paper-trading mode. Defaults to `false`.
     #[serde(default)]
     pub is_emulator: bool,
@@ -183,6 +187,7 @@ mod tests {
         assert_eq!(entry.name, "test");
         assert_eq!(entry.strategy_type, "Bollinger");
         assert!(!entry.is_emulator);
+        assert_eq!(entry.direction, Side::Long); // default
         assert_eq!(entry.get_f64("SL"), Some(0.5));
         assert_eq!(entry.get_f64_or("stopLoss", 0.0), -0.5);
         assert_eq!(entry.get_bool("enablePriceReducer"), Some(true));
@@ -198,5 +203,38 @@ mod tests {
         }"#;
         let entry: StratEntry = serde_json::from_str(json).unwrap();
         assert!(!entry.is_emulator);
+        assert_eq!(entry.direction, Side::Long);
+    }
+
+    #[test]
+    fn parse_direction_short() {
+        let json = r#"{
+            "name": "test",
+            "type": "Demo",
+            "marketType": "LINEAR",
+            "direction": "SHORT",
+            "pairs": ["BTCUSDT"]
+        }"#;
+        let entry: StratEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.direction, Side::Short);
+    }
+
+    #[test]
+    fn parse_direction_case_insensitive() {
+        for val in &["LONG", "Long", "long", "SHORT", "Short", "short"] {
+            let json = format!(r#"{{
+                "name": "test",
+                "type": "Demo",
+                "marketType": "LINEAR",
+                "direction": "{}",
+                "pairs": ["BTCUSDT"]
+            }}"#, val);
+            let entry: StratEntry = serde_json::from_str(&json).unwrap();
+            if val.to_uppercase() == "LONG" {
+                assert_eq!(entry.direction, Side::Long);
+            } else {
+                assert_eq!(entry.direction, Side::Short);
+            }
+        }
     }
 }
