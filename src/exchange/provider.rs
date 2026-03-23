@@ -34,7 +34,7 @@ pub trait Provider: Send + Sync {
     async fn init(&mut self) -> ExchangeResult<()> {
         let market_types = self.config().market_types.clone();
         for mt in market_types {
-            let mut adapter = self.create_adapter(mt).await?;
+            let adapter = self.create_adapter(mt).await?;
             adapter.init().await?;
             self.markets_mut().insert(mt, adapter);
         }
