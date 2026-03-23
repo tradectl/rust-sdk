@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use async_trait::async_trait;
 use crate::types::{
     BookTicker, KlineData, MarketFees, MarketType, Order, OrderRequest, OrderSide, OrderStatus,
@@ -34,21 +36,24 @@ impl Default for TestExchangeConfig {
 
 /// In-memory exchange for testing. Simulates order matching, market data
 /// feeds, and balance tracking without network calls.
+///
+/// All mutable state uses interior mutability so the adapter can be
+/// shared via `Arc<dyn MarketAdapter>` without an outer Mutex.
 pub struct TestExchange {
     market_type_val: MarketType,
     fees: MarketFees,
-    leverage_map: HashMap<String, f64>,
+    leverage_map: RwLock<HashMap<String, f64>>,
     default_leverage: f64,
-    balance: f64,
-    pairs: HashMap<String, PairInfo>,
-    book_tickers: HashMap<String, BookTicker>,
-    open_orders: HashMap<String, Order>,
-    next_order_id: u64,
-    next_callback_id: CallbackId,
-    book_ticker_cbs: HashMap<String, Vec<(CallbackId, BookTickerCallback)>>,
-    kline_cbs: HashMap<String, Vec<(CallbackId, KlineCallback)>>,
-    trade_cbs: HashMap<String, Vec<(CallbackId, TradeCallback)>>,
-    order_update_cbs: Vec<(CallbackId, OrderUpdateCallback)>,
+    balance: RwLock<f64>,
+    pairs: RwLock<HashMap<String, PairInfo>>,
+    book_tickers: RwLock<HashMap<String, BookTicker>>,
+    open_orders: RwLock<HashMap<String, Order>>,
+    next_order_id: AtomicU64,
+    next_callback_id: AtomicU64,
+    book_ticker_cbs: RwLock<HashMap<String, Vec<(CallbackId, BookTickerCallback)>>>,
+    kline_cbs: RwLock<HashMap<String, Vec<(CallbackId, KlineCallback)>>>,
+    trade_cbs: RwLock<HashMap<String, Vec<(CallbackId, TradeCallback)>>>,
+    order_update_cbs: RwLock<Vec<(CallbackId, OrderUpdateCallback)>>,
 }
 
 impl TestExchange {
@@ -56,29 +61,28 @@ impl TestExchange {
         Self {
             market_type_val: config.market_type,
             fees: config.fees,
-            leverage_map: HashMap::new(),
+            leverage_map: RwLock::new(HashMap::new()),
             default_leverage: config.leverage,
-            balance: config.initial_balance,
-            pairs: HashMap::new(),
-            book_tickers: HashMap::new(),
-            open_orders: HashMap::new(),
-            next_order_id: 1,
-            next_callback_id: 1,
-            book_ticker_cbs: HashMap::new(),
-            kline_cbs: HashMap::new(),
-            trade_cbs: HashMap::new(),
-            order_update_cbs: Vec::new(),
+            balance: RwLock::new(config.initial_balance),
+            pairs: RwLock::new(HashMap::new()),
+            book_tickers: RwLock::new(HashMap::new()),
+            open_orders: RwLock::new(HashMap::new()),
+            next_order_id: AtomicU64::new(1),
+            next_callback_id: AtomicU64::new(1),
+            book_ticker_cbs: RwLock::new(HashMap::new()),
+            kline_cbs: RwLock::new(HashMap::new()),
+            trade_cbs: RwLock::new(HashMap::new()),
+            order_update_cbs: RwLock::new(Vec::new()),
         }
     }
 
-    fn next_cb_id(&mut self) -> CallbackId {
-        let id = self.next_callback_id;
-        self.next_callback_id += 1;
-        id
+    fn next_cb_id(&self) -> CallbackId {
+        self.next_callback_id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn notify_order_update(&self, order: &Order) {
-        for (_, cb) in &self.order_update_cbs {
+        let cbs = self.order_update_cbs.read().unwrap();
+        for (_, cb) in cbs.iter() {
             cb(order);
         }
     }
@@ -123,7 +127,7 @@ impl TestExchange {
     // ── Test Helpers ─────────────────────────────────────────────
 
     /// Set the current book ticker for a symbol. Notifies subscribers.
-    pub fn set_book_ticker(&mut self, symbol: &str, bid_price: f64, ask_price: f64) {
+    pub fn set_book_ticker(&self, symbol: &str, bid_price: f64, ask_price: f64) {
         let ticker = BookTicker {
             symbol: symbol.to_string(),
             bid_price,
@@ -132,8 +136,9 @@ impl TestExchange {
             ask_quantity: 1.0,
             timestamp: Self::now_ms(),
         };
-        self.book_tickers.insert(symbol.to_string(), ticker.clone());
-        if let Some(cbs) = self.book_ticker_cbs.get(symbol) {
+        self.book_tickers.write().unwrap().insert(symbol.to_string(), ticker.clone());
+        let cbs = self.book_ticker_cbs.read().unwrap();
+        if let Some(cbs) = cbs.get(symbol) {
             for (_, cb) in cbs {
                 cb(&ticker);
             }
@@ -143,7 +148,8 @@ impl TestExchange {
     /// Emit a kline event for subscribers.
     pub fn emit_kline(&self, kline: &KlineData) {
         let key = format!("{}:{}", kline.symbol, kline.interval);
-        if let Some(cbs) = self.kline_cbs.get(&key) {
+        let cbs = self.kline_cbs.read().unwrap();
+        if let Some(cbs) = cbs.get(&key) {
             for (_, cb) in cbs {
                 cb(kline);
             }
@@ -152,7 +158,8 @@ impl TestExchange {
 
     /// Emit a trade event for subscribers.
     pub fn emit_trade(&self, trade: &TradeData) {
-        if let Some(cbs) = self.trade_cbs.get(&trade.symbol) {
+        let cbs = self.trade_cbs.read().unwrap();
+        if let Some(cbs) = cbs.get(&trade.symbol) {
             for (_, cb) in cbs {
                 cb(trade);
             }
@@ -160,24 +167,26 @@ impl TestExchange {
     }
 
     /// Manually fill a pending order at specified or limit price.
-    pub fn fill_order(&mut self, order_id: &str, fill_price: Option<f64>) -> Option<Order> {
-        let mut order = self.open_orders.remove(order_id)?;
+    pub fn fill_order(&self, order_id: &str, fill_price: Option<f64>) -> Option<Order> {
+        let mut orders = self.open_orders.write().unwrap();
+        let mut order = orders.remove(order_id)?;
         let price = fill_price.unwrap_or(order.price);
         order.status = OrderStatus::Filled;
         order.execution_price = price;
         order.filled_quantity = order.quantity;
+        drop(orders);
         self.notify_order_update(&order);
         Some(order)
     }
 
     /// Set balance directly.
-    pub fn set_balance(&mut self, amount: f64) {
-        self.balance = amount;
+    pub fn set_balance(&self, amount: f64) {
+        *self.balance.write().unwrap() = amount;
     }
 
     /// Add or update a pair.
-    pub fn set_pair(&mut self, pair: PairInfo) {
-        self.pairs.insert(pair.symbol.clone(), pair);
+    pub fn set_pair(&self, pair: PairInfo) {
+        self.pairs.write().unwrap().insert(pair.symbol.clone(), pair);
     }
 }
 
@@ -187,39 +196,39 @@ impl MarketAdapter for TestExchange {
         self.market_type_val
     }
 
-    async fn init(&mut self) -> ExchangeResult<()> {
+    async fn init(&self) -> ExchangeResult<()> {
         Ok(())
     }
 
-    async fn stop(&mut self) -> ExchangeResult<()> {
-        self.open_orders.clear();
-        self.book_ticker_cbs.clear();
-        self.kline_cbs.clear();
-        self.trade_cbs.clear();
-        self.order_update_cbs.clear();
+    async fn stop(&self) -> ExchangeResult<()> {
+        self.open_orders.write().unwrap().clear();
+        self.book_ticker_cbs.write().unwrap().clear();
+        self.kline_cbs.write().unwrap().clear();
+        self.trade_cbs.write().unwrap().clear();
+        self.order_update_cbs.write().unwrap().clear();
         Ok(())
     }
 
     // ── Pair Management ──────────────────────────────────────────
 
     fn get_pairs(&self) -> HashMap<String, PairInfo> {
-        self.pairs.clone()
+        self.pairs.read().unwrap().clone()
     }
 
     fn get_pair_info(&self, symbol: &str) -> Option<PairInfo> {
-        self.pairs.get(symbol).cloned()
+        self.pairs.read().unwrap().get(symbol).cloned()
     }
 
-    async fn load_pair(&mut self, symbol: &str) -> ExchangeResult<PairInfo> {
-        if let Some(pair) = self.pairs.get(symbol) {
+    async fn load_pair(&self, symbol: &str) -> ExchangeResult<PairInfo> {
+        if let Some(pair) = self.pairs.read().unwrap().get(symbol) {
             return Ok(pair.clone());
         }
         let pair = self.create_default_pair(symbol);
-        self.pairs.insert(symbol.to_string(), pair.clone());
+        self.pairs.write().unwrap().insert(symbol.to_string(), pair.clone());
         Ok(pair)
     }
 
-    async fn subscribe_pairs(&mut self, symbols: &[String]) -> ExchangeResult<()> {
+    async fn subscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()> {
         for s in symbols {
             self.load_pair(s).await?;
         }
@@ -229,7 +238,7 @@ impl MarketAdapter for TestExchange {
     // ── Market Data (Pull) ───────────────────────────────────────
 
     fn get_book_ticker(&self, symbol: &str) -> Option<BookTicker> {
-        self.book_tickers.get(symbol).cloned()
+        self.book_tickers.read().unwrap().get(symbol).cloned()
     }
 
     async fn fetch_klines(
@@ -250,55 +259,57 @@ impl MarketAdapter for TestExchange {
 
     // ── Market Data (Push) ───────────────────────────────────────
 
-    fn on_book_ticker(&mut self, symbol: &str, cb: BookTickerCallback) -> CallbackId {
+    fn on_book_ticker(&self, symbol: &str, cb: BookTickerCallback) -> CallbackId {
         let id = self.next_cb_id();
         self.book_ticker_cbs
+            .write().unwrap()
             .entry(symbol.to_string())
             .or_default()
             .push((id, cb));
         id
     }
 
-    fn off_book_ticker(&mut self, symbol: &str, id: CallbackId) {
-        if let Some(cbs) = self.book_ticker_cbs.get_mut(symbol) {
+    fn off_book_ticker(&self, symbol: &str, id: CallbackId) {
+        if let Some(cbs) = self.book_ticker_cbs.write().unwrap().get_mut(symbol) {
             cbs.retain(|(cb_id, _)| *cb_id != id);
         }
     }
 
-    fn on_kline(&mut self, symbol: &str, interval: &str, cb: KlineCallback) -> CallbackId {
+    fn on_kline(&self, symbol: &str, interval: &str, cb: KlineCallback) -> CallbackId {
         let id = self.next_cb_id();
         let key = format!("{symbol}:{interval}");
-        self.kline_cbs.entry(key).or_default().push((id, cb));
+        self.kline_cbs.write().unwrap().entry(key).or_default().push((id, cb));
         id
     }
 
-    fn off_kline(&mut self, symbol: &str, interval: &str, id: CallbackId) {
+    fn off_kline(&self, symbol: &str, interval: &str, id: CallbackId) {
         let key = format!("{symbol}:{interval}");
-        if let Some(cbs) = self.kline_cbs.get_mut(&key) {
+        if let Some(cbs) = self.kline_cbs.write().unwrap().get_mut(&key) {
             cbs.retain(|(cb_id, _)| *cb_id != id);
         }
     }
 
-    fn on_trade(&mut self, symbol: &str, cb: TradeCallback) -> CallbackId {
+    fn on_trade(&self, symbol: &str, cb: TradeCallback) -> CallbackId {
         let id = self.next_cb_id();
         self.trade_cbs
+            .write().unwrap()
             .entry(symbol.to_string())
             .or_default()
             .push((id, cb));
         id
     }
 
-    fn off_trade(&mut self, symbol: &str, id: CallbackId) {
-        if let Some(cbs) = self.trade_cbs.get_mut(symbol) {
+    fn off_trade(&self, symbol: &str, id: CallbackId) {
+        if let Some(cbs) = self.trade_cbs.write().unwrap().get_mut(symbol) {
             cbs.retain(|(cb_id, _)| *cb_id != id);
         }
     }
 
     // ── Order Operations ─────────────────────────────────────────
 
-    async fn place_order(&mut self, request: &OrderRequest) -> ExchangeResult<Order> {
-        let order_id = format!("TEST-{}", self.next_order_id);
-        self.next_order_id += 1;
+    async fn place_order(&self, request: &OrderRequest) -> ExchangeResult<Order> {
+        let id_num = self.next_order_id.fetch_add(1, Ordering::Relaxed);
+        let order_id = format!("TEST-{}", id_num);
         let client_order_id = request.client_order_id.clone().unwrap_or_else(|| order_id.clone());
         let now = Self::now_ms();
 
@@ -331,6 +342,7 @@ impl MarketAdapter for TestExchange {
         if is_market {
             let fill_price = self
                 .book_tickers
+                .read().unwrap()
                 .get(&request.symbol)
                 .map(|t| {
                     if request.side == OrderSide::Buy {
@@ -353,17 +365,19 @@ impl MarketAdapter for TestExchange {
             order.filled_quantity = request.quantity;
             self.notify_order_update(&order);
         } else {
-            self.open_orders.insert(order_id, order.clone());
+            self.open_orders.write().unwrap().insert(order_id, order.clone());
         }
 
         Ok(order)
     }
 
-    async fn cancel_order(&mut self, symbol: &str, order_id: &str) -> ExchangeResult<()> {
-        if let Some(mut order) = self.open_orders.remove(order_id) {
+    async fn cancel_order(&self, symbol: &str, order_id: &str) -> ExchangeResult<()> {
+        let mut orders = self.open_orders.write().unwrap();
+        if let Some(mut order) = orders.remove(order_id) {
             if order.symbol == symbol {
                 order.status = OrderStatus::Canceled;
                 order.closed_at = Some(Self::now_ms());
+                drop(orders);
                 self.notify_order_update(&order);
             }
         }
@@ -371,13 +385,14 @@ impl MarketAdapter for TestExchange {
     }
 
     async fn edit_order(
-        &mut self,
+        &self,
         symbol: &str,
         order_id: &str,
         price: f64,
         quantity: Option<f64>,
     ) -> ExchangeResult<Order> {
-        let order = self.open_orders.get_mut(order_id).ok_or_else(|| {
+        let mut orders = self.open_orders.write().unwrap();
+        let order = orders.get_mut(order_id).ok_or_else(|| {
             format!("Order {order_id} not found on {symbol}")
         })?;
         if order.symbol != symbol {
@@ -395,12 +410,13 @@ impl MarketAdapter for TestExchange {
         _symbol: &str,
         order_id: &str,
     ) -> ExchangeResult<Option<Order>> {
-        Ok(self.open_orders.get(order_id).cloned())
+        Ok(self.open_orders.read().unwrap().get(order_id).cloned())
     }
 
     async fn fetch_open_orders(&self, symbol: &str) -> ExchangeResult<Vec<Order>> {
         Ok(self
             .open_orders
+            .read().unwrap()
             .values()
             .filter(|o| o.symbol == symbol)
             .cloned()
@@ -409,14 +425,14 @@ impl MarketAdapter for TestExchange {
 
     // ── Order Tracking (Push) ────────────────────────────────────
 
-    fn on_order_update(&mut self, cb: OrderUpdateCallback) -> CallbackId {
+    fn on_order_update(&self, cb: OrderUpdateCallback) -> CallbackId {
         let id = self.next_cb_id();
-        self.order_update_cbs.push((id, cb));
+        self.order_update_cbs.write().unwrap().push((id, cb));
         id
     }
 
-    fn off_order_update(&mut self, id: CallbackId) {
-        self.order_update_cbs.retain(|(cb_id, _)| *cb_id != id);
+    fn off_order_update(&self, id: CallbackId) {
+        self.order_update_cbs.write().unwrap().retain(|(cb_id, _)| *cb_id != id);
     }
 
     // ── Account ──────────────────────────────────────────────────
@@ -427,18 +443,19 @@ impl MarketAdapter for TestExchange {
 
     fn get_leverage(&self, symbol: &str) -> f64 {
         self.leverage_map
+            .read().unwrap()
             .get(symbol)
             .copied()
             .unwrap_or(self.default_leverage)
     }
 
-    async fn set_leverage(&mut self, symbol: &str, leverage: f64) -> ExchangeResult<()> {
-        self.leverage_map.insert(symbol.to_string(), leverage);
+    async fn set_leverage(&self, symbol: &str, leverage: f64) -> ExchangeResult<()> {
+        self.leverage_map.write().unwrap().insert(symbol.to_string(), leverage);
         Ok(())
     }
 
     async fn get_balance(&self) -> ExchangeResult<f64> {
-        Ok(self.balance)
+        Ok(*self.balance.read().unwrap())
     }
 
     // ── Profit ───────────────────────────────────────────────────
@@ -456,6 +473,7 @@ impl MarketAdapter for TestExchange {
             MarketType::Inverse => {
                 let contract_size = self
                     .pairs
+                    .read().unwrap()
                     .get(&order.symbol)
                     .map(|p| p.contract_size)
                     .unwrap_or(1.0);
@@ -481,10 +499,9 @@ impl MarketAdapter for TestExchange {
 
     // ── ID Generation ────────────────────────────────────────────
 
-    fn generate_order_id(&mut self) -> String {
-        let id = format!("TEST-{}", self.next_order_id);
-        self.next_order_id += 1;
-        id
+    fn generate_order_id(&self) -> String {
+        let id = self.next_order_id.fetch_add(1, Ordering::Relaxed);
+        format!("TEST-{}", id)
     }
 
     fn generate_tp_id(&self, base_order_id: &str) -> String {
@@ -507,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn market_order_fills_immediately() {
-        let mut ex = exchange();
+        let ex = exchange();
         ex.set_book_ticker("BTCUSDT", 49990.0, 50010.0);
 
         let order = ex
@@ -532,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn limit_order_stays_open() {
-        let mut ex = exchange();
+        let ex = exchange();
 
         let order = ex
             .place_order(&OrderRequest {
@@ -558,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn fill_pending_order() {
-        let mut ex = exchange();
+        let ex = exchange();
 
         let order = ex
             .place_order(&OrderRequest {
@@ -586,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_order_test() {
-        let mut ex = exchange();
+        let ex = exchange();
 
         let order = ex
             .place_order(&OrderRequest {
@@ -610,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn book_ticker_callback() {
-        let mut ex = exchange();
+        let ex = exchange();
         let received = Arc::new(Mutex::new(None::<f64>));
         let received_clone = received.clone();
 
@@ -627,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_book_ticker_removes_callback() {
-        let mut ex = exchange();
+        let ex = exchange();
         let count = Arc::new(Mutex::new(0u32));
         let count_clone = count.clone();
 
@@ -648,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn order_update_callback() {
-        let mut ex = exchange();
+        let ex = exchange();
         ex.set_book_ticker("BTCUSDT", 49990.0, 50010.0);
 
         let updates = Arc::new(Mutex::new(Vec::new()));
@@ -680,7 +697,7 @@ mod tests {
 
     #[test]
     fn generate_ids() {
-        let mut ex = exchange();
+        let ex = exchange();
         let id1 = ex.generate_order_id();
         let id2 = ex.generate_order_id();
         assert_ne!(id1, id2);
@@ -692,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn leverage_and_fees() {
-        let mut ex = exchange();
+        let ex = exchange();
         assert_eq!(ex.get_leverage("BTCUSDT"), 1.0);
 
         ex.set_leverage("BTCUSDT", 20.0).await.unwrap();
@@ -706,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn balance() {
-        let mut ex = exchange();
+        let ex = exchange();
         assert_eq!(ex.get_balance().await.unwrap(), 100_000.0);
 
         ex.set_balance(50_000.0);
@@ -715,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_pair_creates_default() {
-        let mut ex = exchange();
+        let ex = exchange();
         let pair = ex.load_pair("BTCUSDT").await.unwrap();
         assert_eq!(pair.symbol, "BTCUSDT");
         assert_eq!(pair.display_name, "BTC");
@@ -727,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn market_order_without_book_ticker_errors() {
-        let mut ex = exchange();
+        let ex = exchange();
         // No set_book_ticker — market order should fail
         let result = ex
             .place_order(&OrderRequest {
