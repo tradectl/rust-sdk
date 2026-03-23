@@ -65,6 +65,14 @@ pub enum Action {
         kind: OrderKind,
         /// Exit orders to place after this entry fills.
         exits: Vec<ExitOrder>,
+        /// Named entry slot for managing multiple concurrent limit entries.
+        ///
+        /// - `None` (default): single-entry mode. At most one active entry per
+        ///   symbol — if one already exists it is edited in-place.
+        /// - `Some(id)`: named slot. Multiple slots can coexist on the same
+        ///   symbol. If a slot with this ID already has an active entry it is
+        ///   edited; otherwise a new order is placed.
+        entry_id: Option<String>,
     },
     /// Edit a pending entry order (change price and/or size).
     EditEntry {
@@ -72,8 +80,14 @@ pub enum Action {
         price: Option<f64>,
         size: Option<f64>,
     },
-    /// Cancel specific entry orders by ID.
-    CancelEntry { order_ids: Vec<String> },
+    /// Cancel specific entry orders by exchange order ID or by entry slot ID.
+    CancelEntry {
+        /// Cancel by exchange order ID (from FillEvent.order_id).
+        order_ids: Vec<String>,
+        /// Cancel by entry slot ID (from PlaceEntry.entry_id).
+        /// Cancels all active entries whose slot matches.
+        entry_ids: Vec<String>,
+    },
 
     // -- Exits (declarative + imperative) --
 
