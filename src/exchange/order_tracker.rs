@@ -138,6 +138,8 @@ mod tests {
             stop_loss_price: 0.0,
             opened_at: 1000,
             closed_at: None,
+            commission: 0.0,
+            commission_asset: None,
         }
     }
 

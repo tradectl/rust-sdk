@@ -32,4 +32,8 @@ pub struct Order {
     pub stop_loss_price: f64,
     pub opened_at: u64,
     pub closed_at: Option<u64>,
+    /// Actual commission charged by the exchange on this fill.
+    pub commission: f64,
+    /// Asset in which commission was charged (e.g. "BNB", "USDT", "SOL").
+    pub commission_asset: Option<String>,
 }

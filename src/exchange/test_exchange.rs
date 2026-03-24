@@ -337,6 +337,8 @@ impl MarketAdapter for TestExchange {
             stop_loss_price: 0.0,
             opened_at: now,
             closed_at: None,
+            commission: 0.0,
+            commission_asset: None,
         };
 
         if is_market {
@@ -469,6 +471,7 @@ impl MarketAdapter for TestExchange {
                 quantity: order.filled_quantity,
                 leverage: self.get_leverage(&order.symbol),
                 fees: self.fees,
+                actual_fees: None,
             }),
             MarketType::Inverse => {
                 let contract_size = self
@@ -485,6 +488,7 @@ impl MarketAdapter for TestExchange {
                     leverage: self.get_leverage(&order.symbol),
                     contract_size,
                     fees: self.fees,
+                    actual_fees_coin: None,
                 })
             }
             MarketType::Spot => calculate_spot_profit(&SpotProfitParams {
@@ -493,6 +497,7 @@ impl MarketAdapter for TestExchange {
                 exit_price: order.exit_price,
                 quantity: order.filled_quantity,
                 fees: self.fees,
+                actual_fees: None,
             }),
         }
     }
