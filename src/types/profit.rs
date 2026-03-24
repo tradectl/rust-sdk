@@ -23,6 +23,8 @@ pub struct LinearProfitParams {
     pub quantity: f64,
     pub leverage: f64,
     pub fees: MarketFees,
+    /// Actual total commission (entry + exit) from exchange. Overrides rate-based estimate.
+    pub actual_fees: Option<f64>,
 }
 
 pub struct InverseProfitParams {
@@ -33,6 +35,8 @@ pub struct InverseProfitParams {
     pub leverage: f64,
     pub contract_size: f64,
     pub fees: MarketFees,
+    /// Actual total commission (entry + exit) in coin terms. Overrides rate-based estimate.
+    pub actual_fees_coin: Option<f64>,
 }
 
 pub struct SpotProfitParams {
@@ -41,6 +45,8 @@ pub struct SpotProfitParams {
     pub exit_price: f64,
     pub quantity: f64,
     pub fees: MarketFees,
+    /// Actual total commission (entry + exit) from exchange. Overrides rate-based estimate.
+    pub actual_fees: Option<f64>,
 }
 
 fn direction(side: OrderSide) -> f64 {
@@ -70,9 +76,13 @@ pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
     let dir = direction(p.side);
     let pnl = dir * p.quantity * (p.exit_price - p.entry_price);
 
-    let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
-    let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
-    let total_fees = entry_fee + exit_fee;
+    let total_fees = if let Some(actual) = p.actual_fees {
+        actual
+    } else {
+        let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
+        let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
+        entry_fee + exit_fee
+    };
 
     let net_pnl = pnl - total_fees;
     let notional = p.quantity * p.entry_price;
@@ -125,11 +135,13 @@ pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
     let inv_exit = 1.0 / p.exit_price;
     let pnl_coin = dir * p.contract_size * p.quantity * (inv_entry - inv_exit);
 
-    let notional_entry = p.contract_size * p.quantity / p.entry_price;
-    let notional_exit = p.contract_size * p.quantity / p.exit_price;
-    let entry_fee = notional_entry.abs() * p.fees.maker_rate;
-    let exit_fee = notional_exit.abs() * p.fees.taker_rate;
-    let total_fees_coin = entry_fee + exit_fee;
+    let total_fees_coin = if let Some(actual) = p.actual_fees_coin {
+        actual
+    } else {
+        let notional_entry = p.contract_size * p.quantity / p.entry_price;
+        let notional_exit = p.contract_size * p.quantity / p.exit_price;
+        notional_entry.abs() * p.fees.maker_rate + notional_exit.abs() * p.fees.taker_rate
+    };
 
     let net_pnl_coin = pnl_coin - total_fees_coin;
     let net_pnl_usd = net_pnl_coin * p.exit_price;
@@ -172,9 +184,13 @@ pub fn calculate_spot_profit(p: &SpotProfitParams) -> ProfitResult {
     let dir = direction(p.side);
     let pnl = dir * p.quantity * (p.exit_price - p.entry_price);
 
-    let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
-    let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
-    let total_fees = entry_fee + exit_fee;
+    let total_fees = if let Some(actual) = p.actual_fees {
+        actual
+    } else {
+        let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
+        let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
+        entry_fee + exit_fee
+    };
 
     let net_pnl = pnl - total_fees;
     let initial_value = p.quantity * p.entry_price;
@@ -210,6 +226,7 @@ mod tests {
             quantity: 1.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert!((r.profit_usd - 969.6).abs() < 0.01);
         assert!((r.profit - 19.392).abs() < 0.01);
@@ -225,6 +242,7 @@ mod tests {
             quantity: 1.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert!((r.profit_usd - 970.4).abs() < 0.01);
         assert!(r.profit > 0.0);
@@ -239,6 +257,7 @@ mod tests {
             quantity: 1.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert!((r.profit_usd - (-1029.6)).abs() < 0.01);
         assert!(r.profit < 0.0);
@@ -254,6 +273,7 @@ mod tests {
             leverage: 10.0,
             contract_size: 100.0,
             fees: TEST_FEES,
+            actual_fees_coin: None,
         });
         assert!(r.profit_usd > 0.0);
         assert!(r.profit > 0.0);
@@ -270,6 +290,7 @@ mod tests {
             leverage: 10.0,
             contract_size: 100.0,
             fees: TEST_FEES,
+            actual_fees_coin: None,
         });
         assert!(r.profit_usd < 0.0);
         assert!(r.profit < 0.0);
@@ -283,6 +304,7 @@ mod tests {
             exit_price: 110.0,
             quantity: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert!((r.profit_usd - 99.36).abs() < 0.01);
         assert!((r.profit - 9.936).abs() < 0.01);
@@ -298,6 +320,7 @@ mod tests {
             quantity: 0.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
@@ -313,6 +336,7 @@ mod tests {
             quantity: -1.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -326,6 +350,7 @@ mod tests {
             quantity: 1.0,
             leverage: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -339,6 +364,7 @@ mod tests {
             quantity: 1.0,
             leverage: 10.0,
             fees: MarketFees { maker_rate: -0.1, taker_rate: 0.0004 },
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -353,6 +379,7 @@ mod tests {
             leverage: 10.0,
             contract_size: 0.0,
             fees: TEST_FEES,
+            actual_fees_coin: None,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -365,6 +392,7 @@ mod tests {
             exit_price: 110.0,
             quantity: 10.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -379,6 +407,7 @@ mod tests {
             leverage: 10.0,
             contract_size: 100.0,
             fees: TEST_FEES,
+            actual_fees_coin: None,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
@@ -392,8 +421,121 @@ mod tests {
             exit_price: 110.0,
             quantity: 0.0,
             fees: TEST_FEES,
+            actual_fees: None,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
+    }
+
+    // ── Actual fees override tests ──────────────────────────────
+
+    #[test]
+    fn linear_actual_fees_override_estimated() {
+        // Same trade, one with rate-based, one with actual fees
+        let estimated = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+            actual_fees: None,
+        });
+        let actual = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+            actual_fees: Some(50.0), // higher than estimated ~30.4
+        });
+        assert!((estimated.fees - 30.4).abs() < 0.01);
+        assert_eq!(actual.fees, 50.0);
+        assert!(actual.profit_usd < estimated.profit_usd);
+        // PnL difference = fee difference
+        assert!((estimated.profit_usd - actual.profit_usd - (50.0 - estimated.fees)).abs() < 0.001);
+    }
+
+    #[test]
+    fn linear_actual_fees_zero_means_no_fees() {
+        let r = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+            actual_fees: Some(0.0),
+        });
+        assert_eq!(r.fees, 0.0);
+        assert!((r.profit_usd - 1000.0).abs() < 0.01); // pure PnL, no fees
+    }
+
+    #[test]
+    fn inverse_actual_fees_coin_override_estimated() {
+        let estimated = calculate_inverse_profit(&InverseProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 100.0,
+            leverage: 10.0,
+            contract_size: 100.0,
+            fees: TEST_FEES,
+            actual_fees_coin: None,
+        });
+        let actual = calculate_inverse_profit(&InverseProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 100.0,
+            leverage: 10.0,
+            contract_size: 100.0,
+            fees: TEST_FEES,
+            actual_fees_coin: Some(0.01),
+        });
+        assert!(estimated.fees > 0.0);
+        assert!((actual.fees - 0.01 * 51000.0).abs() < 0.01); // coin fees * exit price
+        assert!(actual.profit_usd != estimated.profit_usd);
+    }
+
+    #[test]
+    fn spot_actual_fees_override_estimated() {
+        let estimated = calculate_spot_profit(&SpotProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 100.0,
+            exit_price: 110.0,
+            quantity: 10.0,
+            fees: TEST_FEES,
+            actual_fees: None,
+        });
+        let actual = calculate_spot_profit(&SpotProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 100.0,
+            exit_price: 110.0,
+            quantity: 10.0,
+            fees: TEST_FEES,
+            actual_fees: Some(1.0),
+        });
+        assert!((estimated.fees - 0.64).abs() < 0.01);
+        assert_eq!(actual.fees, 1.0);
+        assert!(actual.profit_usd < estimated.profit_usd);
+    }
+
+    #[test]
+    fn actual_fees_none_falls_back_to_rates() {
+        // Verify None behaves exactly like before
+        let with_none = calculate_linear_profit(&LinearProfitParams {
+            side: OrderSide::Buy,
+            entry_price: 50000.0,
+            exit_price: 51000.0,
+            quantity: 1.0,
+            leverage: 10.0,
+            fees: TEST_FEES,
+            actual_fees: None,
+        });
+        // Manual: entry_fee = 50000 * 0.0002 = 10, exit_fee = 51000 * 0.0004 = 20.4
+        assert!((with_none.fees - 30.4).abs() < 0.01);
+        assert!((with_none.profit_usd - 969.6).abs() < 0.01);
     }
 }
