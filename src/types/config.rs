@@ -136,6 +136,10 @@ pub struct StratEntry {
     /// Paper-trading mode. Defaults to `false`.
     #[serde(default)]
     pub is_emulator: bool,
+    /// Maximum number of open positions + pending entries for this strategy.
+    /// 0 = unlimited (default).
+    #[serde(default)]
+    pub max_order_count: usize,
     pub pairs: Vec<String>,
     /// Strategy source: `"marketplace"` or `"local"` (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
