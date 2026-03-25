@@ -35,6 +35,8 @@ pub enum ApiErrorKind {
     TooManyOrders,
     /// -4005: Quantity exceeds max allowed.
     QuantityExceeded,
+    /// -4164: Order notional below exchange minimum.
+    MinNotional,
     /// Duplicate client order ID (order already placed with this ID).
     DuplicateOrderId,
     /// -1003: Too many requests (rate limit hit).
@@ -114,7 +116,7 @@ impl ExchangeApiError {
     /// Covers margin errors and quantity-exceeded — both indicate the strategy's parameters
     /// are incompatible with the current account/exchange state.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::InsufficientMargin | ApiErrorKind::QuantityExceeded)
+        matches!(self.kind, ApiErrorKind::InsufficientMargin | ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
@@ -148,7 +150,8 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -2015 => ApiErrorKind::Unauthorized,
         -4199 => ApiErrorKind::SymbolNotTrading,
         -1015 => ApiErrorKind::TooManyOrders,
-        -4005 => ApiErrorKind::QuantityExceeded,
+        -4005 | -2027 => ApiErrorKind::QuantityExceeded,
+        -4164 => ApiErrorKind::MinNotional,
         -1003 => ApiErrorKind::RateLimited,
         -1112 => ApiErrorKind::DuplicateOrderId,
         _ => {
@@ -276,6 +279,15 @@ mod tests {
         );
         assert!(qty.is_persistent());
         assert!(!qty.is_margin());
+    }
+
+    #[test]
+    fn parse_min_notional() {
+        let body = r#"{"code":-4164,"msg":"Order's notional must be no smaller than 5 (unless you choose reduce only)."}"#;
+        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        assert_eq!(err.kind, ApiErrorKind::MinNotional);
+        assert!(err.is_persistent());
+        assert!(!err.is_fatal());
     }
 
     #[test]
