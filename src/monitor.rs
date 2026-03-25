@@ -125,6 +125,11 @@ impl MonitorBroadcaster {
         Ok(Self { tx })
     }
 
+    /// Returns `true` if at least one monitor client is connected.
+    pub fn has_clients(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     /// Broadcast an event to all connected clients.
     /// No-op if no clients are connected.
     pub fn broadcast(&self, event: &MonitorEvent) {
