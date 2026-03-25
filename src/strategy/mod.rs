@@ -142,6 +142,9 @@ pub struct StrategyContext<'a> {
     pub trade_count: usize,
     /// Configured trading direction for this strategy instance.
     pub direction: Side,
+    /// `true` when the strategy has reached its `maxOrderCount` limit.
+    /// Strategies should skip entry logic when this is set.
+    pub max_orders_reached: bool,
 }
 
 // ---------------------------------------------------------------------------
