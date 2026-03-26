@@ -82,6 +82,9 @@ pub struct ApiConfig {
     /// Hyperliquid private key for signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+    /// OKX / Bitget passphrase (required for these exchanges).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -92,6 +95,7 @@ impl Default for ApiConfig {
             secret: String::new(),
             wallet_address: None,
             private_key: None,
+            passphrase: None,
         }
     }
 }
