@@ -261,6 +261,16 @@ pub trait Strategy: Send {
     fn monitor_snapshot(&self, _ctx: &StrategyContext, _ticker: &TickerEvent) -> MonitorSnapshot {
         MonitorSnapshot::default()
     }
+
+    /// Return session state as JSON for Telegram `/session` command.
+    /// Strategies with a SessionManager should override this.
+    fn session_state(&mut self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Reset session state for a symbol (or all if symbol is empty).
+    /// Called by the runner when the Telegram `/session_reset` command is received.
+    fn session_reset(&mut self, _symbol: &str) {}
 }
 
 // ---------------------------------------------------------------------------

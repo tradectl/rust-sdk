@@ -3,6 +3,8 @@
 //! Shared across live runner, paper runner, and CLI.
 
 use std::collections::HashMap;
+
+fn default_true() -> bool { true }
 use super::enums::Side;
 
 /// Top-level bot configuration.
@@ -144,7 +146,11 @@ pub struct StratEntry {
     /// 0 = unlimited (default).
     #[serde(default)]
     pub max_order_count: usize,
+    #[serde(default)]
     pub pairs: Vec<String>,
+    /// Send notifications (Telegram, etc.) for this strategy. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub notify: bool,
     /// Strategy source: `"marketplace"` or `"local"` (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
