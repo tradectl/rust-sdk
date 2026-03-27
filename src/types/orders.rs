@@ -25,7 +25,10 @@ pub struct Order {
     pub execution_price: f64,
     pub exit_price: f64,
     pub quantity: f64,
+    /// Cumulative filled quantity (Binance `z` field).
     pub filled_quantity: f64,
+    /// Quantity filled in this specific event (Binance `l` field).
+    pub last_filled_quantity: f64,
     pub profit: f64,
     pub profit_usd: f64,
     pub take_profit_price: f64,
