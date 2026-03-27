@@ -132,6 +132,7 @@ mod tests {
             exit_price: 0.0,
             quantity: 1.0,
             filled_quantity: 0.0,
+            last_filled_quantity: 0.0,
             profit: 0.0,
             profit_usd: 0.0,
             take_profit_price: 0.0,
