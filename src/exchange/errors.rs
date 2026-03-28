@@ -120,6 +120,8 @@ impl ExchangeApiError {
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
+    /// TooManyOrders (-1015) is silent because the ApiLimitTracker handles it
+    /// globally — individual per-order warnings would just spam the logs.
     pub fn is_silent(&self) -> bool {
         matches!(
             self.kind,
@@ -128,6 +130,7 @@ impl ExchangeApiError {
                 | ApiErrorKind::ReduceOnlyRejected
                 | ApiErrorKind::SlTriggerPrice
                 | ApiErrorKind::DuplicateOrderId
+                | ApiErrorKind::TooManyOrders
         )
     }
 
