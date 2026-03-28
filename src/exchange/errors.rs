@@ -132,10 +132,13 @@ impl ExchangeApiError {
     }
 
     /// Errors that can be retried after a short delay.
+    ///
+    /// Note: `TooManyOrders` (-1015) is NOT retryable — it's a per-minute
+    /// order rate limit. Retrying after 1s just adds to the overload.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self.kind,
-            ApiErrorKind::Network | ApiErrorKind::RateLimited | ApiErrorKind::TooManyOrders
+            ApiErrorKind::Network | ApiErrorKind::RateLimited
         )
     }
 }
