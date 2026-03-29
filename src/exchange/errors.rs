@@ -41,6 +41,8 @@ pub enum ApiErrorKind {
     DuplicateOrderId,
     /// -1003: Too many requests (rate limit hit).
     RateLimited,
+    /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
+    IpBanned,
     /// Network/transport error (not an API error).
     Network,
     /// Response deserialization error.
@@ -58,7 +60,12 @@ impl ExchangeApiError {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             if let (Some(code), Some(msg)) = (v["code"].as_i64(), v["msg"].as_str()) {
                 let code = code as i32;
-                let kind = classify_code(code, msg);
+                // HTTP 418 + "banned" = IP ban (not just rate limit)
+                let kind = if http_status == 418 && msg.to_lowercase().contains("banned") {
+                    ApiErrorKind::IpBanned
+                } else {
+                    classify_code(code, msg)
+                };
                 return Self { kind, code, message: msg.to_string(), endpoint, http_status };
             }
         }
@@ -107,6 +114,12 @@ impl ExchangeApiError {
         }
     }
 
+    /// IP ban — handled globally by the coordinator's ping handler
+    /// (pause for ban duration, then resume). Not fatal because it's temporary.
+    pub fn is_ip_banned(&self) -> bool {
+        self.kind == ApiErrorKind::IpBanned
+    }
+
     /// Errors indicating insufficient margin/balance.
     pub fn is_margin(&self) -> bool {
         self.kind == ApiErrorKind::InsufficientMargin
@@ -120,6 +133,8 @@ impl ExchangeApiError {
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
+    /// TooManyOrders (-1015) is silent because the ApiLimitTracker handles it
+    /// globally — individual per-order warnings would just spam the logs.
     pub fn is_silent(&self) -> bool {
         matches!(
             self.kind,
@@ -128,14 +143,19 @@ impl ExchangeApiError {
                 | ApiErrorKind::ReduceOnlyRejected
                 | ApiErrorKind::SlTriggerPrice
                 | ApiErrorKind::DuplicateOrderId
+                | ApiErrorKind::TooManyOrders
+                | ApiErrorKind::IpBanned
         )
     }
 
     /// Errors that can be retried after a short delay.
+    ///
+    /// Note: `TooManyOrders` (-1015) is NOT retryable — it's a per-minute
+    /// order rate limit. Retrying after 1s just adds to the overload.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self.kind,
-            ApiErrorKind::Network | ApiErrorKind::RateLimited | ApiErrorKind::TooManyOrders
+            ApiErrorKind::Network | ApiErrorKind::RateLimited
         )
     }
 }
@@ -250,6 +270,27 @@ mod tests {
         let err = ExchangeApiError::from_response(429, body, "GET /fapi/v1/order".into());
         assert!(err.is_retryable());
         assert!(!err.is_fatal());
+    }
+
+    #[test]
+    fn ip_banned_is_silent_not_retryable() {
+        let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
+        let err = ExchangeApiError::from_response(418, body, "GET /dapi/v1/ping".into());
+        assert_eq!(err.kind, ApiErrorKind::IpBanned);
+        assert!(err.is_ip_banned());
+        assert!(err.is_silent());
+        assert!(!err.is_fatal());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_1003_not_ip_ban_on_429() {
+        // Same code -1003 but HTTP 429 (not 418) = regular rate limit, not ban
+        let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
+        let err = ExchangeApiError::from_response(429, body, "GET /dapi/v1/ping".into());
+        assert_eq!(err.kind, ApiErrorKind::RateLimited);
+        assert!(!err.is_fatal());
+        assert!(err.is_retryable());
     }
 
     #[test]
