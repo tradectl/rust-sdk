@@ -157,8 +157,45 @@ pub struct StratEntry {
     /// Pinned marketplace version. Omitted = latest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Shadow parameter optimization config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowConfig>,
     /// Strategy-specific parameters (variable per strategy type).
     #[serde(flatten)]
+    pub params: HashMap<String, serde_json::Value>,
+}
+
+/// Shadow parameter optimization configuration.
+///
+/// Runs alternative parameter sets on paper alongside the live strategy,
+/// tracking metrics and periodically reporting outperformers.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub variants: Vec<ShadowVariant>,
+    /// Evaluation window in seconds. Metrics reset after this period. Default: 86400 (24h).
+    #[serde(default = "default_evaluation_window")]
+    pub evaluation_window_secs: u64,
+    /// Minimum number of trades before a variant is reported. Default: 10.
+    #[serde(default = "default_min_trades")]
+    pub min_trades: usize,
+    /// How often to log/broadcast shadow results in seconds. Default: 60.
+    #[serde(default = "default_report_interval")]
+    pub report_interval_secs: u64,
+}
+
+fn default_evaluation_window() -> u64 { 86400 }
+fn default_min_trades() -> usize { 10 }
+fn default_report_interval() -> u64 { 60 }
+
+/// A named parameter variant for shadow optimization.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ShadowVariant {
+    pub name: String,
+    /// Parameter overrides. Merged on top of the base strategy params.
     pub params: HashMap<String, serde_json::Value>,
 }
 

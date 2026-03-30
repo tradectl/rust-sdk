@@ -50,12 +50,35 @@ pub struct MonitorFill {
     pub position_closed: bool,
 }
 
+/// Shadow optimization summary, broadcast periodically.
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowSummary {
+    pub timestamp_ms: u64,
+    pub strategy_name: String,
+    pub symbol: String,
+    pub window_secs: u64,
+    pub results: Vec<ShadowTrialResult>,
+}
+
+/// Metrics for a single shadow variant.
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowTrialResult {
+    pub variant: String,
+    pub trade_count: usize,
+    pub pnl: f64,
+    pub pnl_pct: f64,
+    pub max_drawdown_pct: f64,
+    pub score: f64,
+    pub eligible: bool,
+}
+
 /// Tagged event envelope for JSON serialization.
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum MonitorEvent {
     Tick(MonitorTick),
     Fill(MonitorFill),
+    Shadow(ShadowSummary),
 }
 
 /// Broadcasts monitor events to all connected WebSocket clients.
