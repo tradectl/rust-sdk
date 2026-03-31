@@ -35,6 +35,9 @@ pub enum ApiErrorKind {
     TooManyOrders,
     /// -4005: Quantity exceeds max allowed.
     QuantityExceeded,
+    /// -2027: Exceeded maximum allowable position at current leverage.
+    /// Per-pair limit, not account-wide — should not stop the strategy.
+    MaxPositionExceeded,
     /// -4164: Order notional below exchange minimum.
     MinNotional,
     /// Duplicate client order ID (order already placed with this ID).
@@ -145,6 +148,7 @@ impl ExchangeApiError {
                 | ApiErrorKind::DuplicateOrderId
                 | ApiErrorKind::TooManyOrders
                 | ApiErrorKind::IpBanned
+                | ApiErrorKind::MaxPositionExceeded
         )
     }
 
@@ -170,7 +174,8 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -2015 => ApiErrorKind::Unauthorized,
         -4199 => ApiErrorKind::SymbolNotTrading,
         -1015 => ApiErrorKind::TooManyOrders,
-        -4005 | -2027 => ApiErrorKind::QuantityExceeded,
+        -4005 => ApiErrorKind::QuantityExceeded,
+        -2027 => ApiErrorKind::MaxPositionExceeded,
         -4164 => ApiErrorKind::MinNotional,
         -1003 => ApiErrorKind::RateLimited,
         -1112 => ApiErrorKind::DuplicateOrderId,
