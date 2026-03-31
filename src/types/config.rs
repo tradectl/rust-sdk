@@ -19,6 +19,11 @@ pub struct BotConfig {
     pub monitor: Option<MonitorConfig>,
     pub paper: Option<PaperSettings>,
     pub strats: Vec<StratEntry>,
+    /// Automatically reduce leverage to the exchange's per-symbol maximum
+    /// during init. Prevents -2027 errors when the exchange lowers a symbol's
+    /// max leverage below the account's cached value. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_adjust_leverage: bool,
 }
 
 /// Paper trading emulation settings.
