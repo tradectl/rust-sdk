@@ -22,7 +22,7 @@ pub struct BotConfig {
     /// Automatically reduce leverage to the exchange's per-symbol maximum
     /// during init. Prevents -2027 errors when the exchange lowers a symbol's
     /// max leverage below the account's cached value. Default: true.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_adjust_leverage: bool,
 }
 
