@@ -5,6 +5,8 @@ pub enum OrderType {
     StopMarket,
     StopLimit,
     TrailingStopMarket,
+    /// Exchange-initiated liquidation (e.g. Binance `autoclose-*` orders).
+    Liquidation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
