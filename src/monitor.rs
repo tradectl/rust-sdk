@@ -58,6 +58,9 @@ pub struct ShadowSummary {
     pub symbol: String,
     pub window_secs: u64,
     pub results: Vec<ShadowTrialResult>,
+    /// Detailed state for top-N variants (sorted by score descending).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ShadowVariantDetail>,
 }
 
 /// Metrics for a single shadow variant.
@@ -70,6 +73,52 @@ pub struct ShadowTrialResult {
     pub max_drawdown_pct: f64,
     pub score: f64,
     pub eligible: bool,
+}
+
+/// Detailed state for a single shadow variant.
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowVariantDetail {
+    pub variant: String,
+    pub position: Option<ShadowPosition>,
+    pub active_exits: Vec<ShadowExit>,
+    pub pending_entry: Option<ShadowPendingEntry>,
+    pub balance: f64,
+    pub win_count: usize,
+    pub loss_count: usize,
+    pub avg_win_pct: f64,
+    pub avg_loss_pct: f64,
+    pub recent_trades: Vec<ShadowTrade>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowPosition {
+    pub side: String,
+    pub avg_entry: f64,
+    pub quantity: f64,
+    pub entry_count: usize,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowExit {
+    pub id: String,
+    pub price: f64,
+    pub kind: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowPendingEntry {
+    pub side: String,
+    pub price: f64,
+    pub size: f64,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct ShadowTrade {
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub pnl_pct: f64,
+    pub side: String,
+    pub exit_time: u64,
 }
 
 /// Tagged event envelope for JSON serialization.

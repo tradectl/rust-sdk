@@ -174,6 +174,18 @@ pub struct StratEntry {
 ///
 /// Runs alternative parameter sets on paper alongside the live strategy,
 /// tracking metrics and periodically reporting outperformers.
+///
+/// Supports two modes of variant specification:
+/// - **Explicit variants**: `"variants": [{"name": "v1", "params": {...}}]`
+/// - **Range-based**: Inline param ranges generate cartesian product automatically.
+///   ```json
+///   "shadow": {
+///       "enabled": true,
+///       "entryDistance": {"min": 0.20, "max": 0.40, "step": 0.02},
+///       "takeProfit": {"min": 0.12, "max": 0.25, "step": 0.01}
+///   }
+///   ```
+///   Call [`ShadowConfig::expand_ranges`] to generate variants from ranges.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShadowConfig {
@@ -190,6 +202,79 @@ pub struct ShadowConfig {
     /// How often to log/broadcast shadow results in seconds. Default: 60.
     #[serde(default = "default_report_interval")]
     pub report_interval_secs: u64,
+    /// Inline parameter ranges (captured via serde flatten).
+    /// Keys with `{"min": f64, "max": f64, "step": f64}` values are treated as ranges.
+    #[serde(flatten, default)]
+    pub ranges: HashMap<String, serde_json::Value>,
+}
+
+impl ShadowConfig {
+    /// Expand inline parameter ranges into explicit variants via cartesian product.
+    ///
+    /// Range params are objects with `min`, `max`, `step` keys:
+    /// ```json
+    /// "entryDistance": {"min": 0.20, "max": 0.40, "step": 0.02}
+    /// ```
+    ///
+    /// Generates all combinations and appends them to `self.variants`.
+    /// No-op if no valid ranges are found.
+    pub fn expand_ranges(&mut self) {
+        let mut range_params: Vec<(String, Vec<f64>)> = Vec::new();
+
+        for (key, val) in &self.ranges {
+            if let Some(obj) = val.as_object() {
+                if let (Some(min), Some(max), Some(step)) = (
+                    obj.get("min").and_then(|v| v.as_f64()),
+                    obj.get("max").and_then(|v| v.as_f64()),
+                    obj.get("step").and_then(|v| v.as_f64()),
+                ) {
+                    if step > 0.0 && max >= min {
+                        let mut values = Vec::new();
+                        let mut v = min;
+                        // epsilon tolerance for float rounding at boundary
+                        while v <= max + step * 0.01 {
+                            values.push((v * 1e8).round() / 1e8);
+                            v += step;
+                        }
+                        range_params.push((key.clone(), values));
+                    }
+                }
+            }
+        }
+
+        if range_params.is_empty() {
+            return;
+        }
+
+        // Sort by param name for deterministic variant ordering
+        range_params.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Cartesian product of all ranges
+        let mut combos: Vec<Vec<(&str, f64)>> = vec![vec![]];
+        for (param_name, values) in &range_params {
+            let mut next = Vec::with_capacity(combos.len() * values.len());
+            for combo in &combos {
+                for &val in values {
+                    let mut c = combo.clone();
+                    c.push((param_name.as_str(), val));
+                    next.push(c);
+                }
+            }
+            combos = next;
+        }
+
+        // Convert to ShadowVariant and append
+        for combo in combos {
+            let name = combo.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("_");
+            let params: HashMap<String, serde_json::Value> = combo.into_iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::from(v)))
+                .collect();
+            self.variants.push(ShadowVariant { name, params });
+        }
+    }
 }
 
 fn default_evaluation_window() -> u64 { 86400 }
@@ -292,5 +377,140 @@ mod tests {
                 assert_eq!(entry.direction, Side::Short);
             }
         }
+    }
+
+    // ── Shadow config tests ────────────────────────────────────────
+
+    #[test]
+    fn shadow_parse_explicit_variants() {
+        let json = r#"{
+            "enabled": true,
+            "variants": [
+                {"name": "v1", "params": {"entryDistance": 0.3, "takeProfit": 0.2}},
+                {"name": "v2", "params": {"entryDistance": 0.4}}
+            ],
+            "evaluationWindowSecs": 3600,
+            "minTrades": 5,
+            "reportIntervalSecs": 30
+        }"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        assert!(sc.enabled);
+        assert_eq!(sc.variants.len(), 2);
+        assert_eq!(sc.variants[0].name, "v1");
+        assert_eq!(sc.evaluation_window_secs, 3600);
+        assert_eq!(sc.min_trades, 5);
+        assert_eq!(sc.report_interval_secs, 30);
+    }
+
+    #[test]
+    fn shadow_parse_range_config() {
+        let json = r#"{
+            "enabled": true,
+            "entryDistance": {"min": 0.20, "max": 0.24, "step": 0.02},
+            "takeProfit": {"min": 0.10, "max": 0.12, "step": 0.01}
+        }"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        assert!(sc.enabled);
+        assert!(sc.variants.is_empty());
+        assert_eq!(sc.ranges.len(), 2);
+        assert!(sc.ranges.contains_key("entryDistance"));
+        assert!(sc.ranges.contains_key("takeProfit"));
+    }
+
+    #[test]
+    fn shadow_expand_ranges_cartesian_product() {
+        let json = r#"{
+            "enabled": true,
+            "entryDistance": {"min": 0.20, "max": 0.24, "step": 0.02},
+            "takeProfit": {"min": 0.10, "max": 0.12, "step": 0.01}
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+
+        // entryDistance: 0.20, 0.22, 0.24 = 3 values
+        // takeProfit: 0.10, 0.11, 0.12 = 3 values
+        // 3 × 3 = 9 variants
+        assert_eq!(sc.variants.len(), 9);
+
+        // Sorted by param name, so entryDistance comes first
+        assert!(sc.variants[0].name.starts_with("entryDistance="));
+        assert!(sc.variants[0].name.contains("takeProfit="));
+
+        // Check first and last variant values
+        let first = &sc.variants[0];
+        assert_eq!(first.params.get("entryDistance").unwrap().as_f64().unwrap(), 0.2);
+        assert_eq!(first.params.get("takeProfit").unwrap().as_f64().unwrap(), 0.1);
+
+        let last = &sc.variants[8];
+        assert_eq!(last.params.get("entryDistance").unwrap().as_f64().unwrap(), 0.24);
+        assert_eq!(last.params.get("takeProfit").unwrap().as_f64().unwrap(), 0.12);
+    }
+
+    #[test]
+    fn shadow_expand_ranges_single_param() {
+        let json = r#"{
+            "enabled": true,
+            "takeProfit": {"min": 0.10, "max": 0.13, "step": 0.01}
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+
+        // 0.10, 0.11, 0.12, 0.13 = 4 variants
+        assert_eq!(sc.variants.len(), 4);
+        assert_eq!(sc.variants[0].name, "takeProfit=0.1");
+        assert_eq!(sc.variants[3].name, "takeProfit=0.13");
+    }
+
+    #[test]
+    fn shadow_expand_ranges_preserves_explicit_variants() {
+        let json = r#"{
+            "enabled": true,
+            "variants": [{"name": "manual", "params": {"x": 1.0}}],
+            "takeProfit": {"min": 0.10, "max": 0.11, "step": 0.01}
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+
+        // 1 explicit + 2 from range
+        assert_eq!(sc.variants.len(), 3);
+        assert_eq!(sc.variants[0].name, "manual");
+        assert_eq!(sc.variants[1].name, "takeProfit=0.1");
+        assert_eq!(sc.variants[2].name, "takeProfit=0.11");
+    }
+
+    #[test]
+    fn shadow_expand_ranges_no_ranges_is_noop() {
+        let json = r#"{
+            "enabled": true,
+            "variants": [{"name": "v1", "params": {"x": 1.0}}]
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+        assert_eq!(sc.variants.len(), 1);
+    }
+
+    #[test]
+    fn shadow_expand_ranges_invalid_range_ignored() {
+        // step = 0 and max < min should be ignored
+        let json = r#"{
+            "enabled": true,
+            "bad1": {"min": 0.5, "max": 0.3, "step": 0.1},
+            "bad2": {"min": 0.1, "max": 0.5, "step": 0.0},
+            "bad3": {"min": 0.1, "max": 0.5}
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+        assert_eq!(sc.variants.len(), 0);
+    }
+
+    #[test]
+    fn shadow_defaults() {
+        let json = r#"{"enabled": true}"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(sc.evaluation_window_secs, 86400);
+        assert_eq!(sc.min_trades, 10);
+        assert_eq!(sc.report_interval_secs, 60);
+        assert!(sc.variants.is_empty());
+        assert!(sc.ranges.is_empty());
     }
 }
