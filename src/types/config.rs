@@ -202,6 +202,9 @@ pub struct ShadowConfig {
     /// How often to log/broadcast shadow results in seconds. Default: 60.
     #[serde(default = "default_report_interval")]
     pub report_interval_secs: u64,
+    /// Promotion configuration for auto/manual/agent param rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionConfig>,
     /// Inline parameter ranges (captured via serde flatten).
     /// Keys with `{"min": f64, "max": f64, "step": f64}` values are treated as ranges.
     #[serde(flatten, default)]
@@ -287,6 +290,89 @@ pub struct ShadowVariant {
     pub name: String,
     /// Parameter overrides. Merged on top of the base strategy params.
     pub params: HashMap<String, serde_json::Value>,
+}
+
+/// Promotion configuration for shadow parameter rotation.
+///
+/// Controls when and how a winning shadow variant's params replace the live strategy.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionConfig {
+    /// `"off"` (default), `"auto"`, `"manual"`, or `"agent"`.
+    #[serde(default = "default_promotion_mode")]
+    pub mode: String,
+    /// Minimum absolute score for a variant to be promotion-eligible.
+    #[serde(default)]
+    pub min_score: f64,
+    /// Candidate score must exceed live baseline by at least this margin.
+    #[serde(default = "default_min_margin")]
+    pub min_margin: f64,
+    /// Reject candidates whose max drawdown exceeds this percentage.
+    #[serde(default = "default_max_drawdown")]
+    pub max_drawdown_pct: f64,
+    /// Only promote when no position is open. Default: true.
+    #[serde(default = "default_true")]
+    pub require_no_position: bool,
+    /// Minimum seconds between promotions per symbol. Default: 3600.
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: u64,
+    /// After promotion, add old live params as a shadow variant. Default: true.
+    #[serde(default = "default_true")]
+    pub track_live_as_variant: bool,
+    /// Maximum promotions per evaluation window. Default: 1.
+    #[serde(default = "default_max_promotions")]
+    pub max_promotions_per_window: usize,
+}
+
+fn default_promotion_mode() -> String { "off".to_string() }
+fn default_min_margin() -> f64 { 0.3 }
+fn default_max_drawdown() -> f64 { 15.0 }
+fn default_cooldown() -> u64 { 3600 }
+fn default_max_promotions() -> usize { 1 }
+
+impl PromotionConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.mode != "off"
+    }
+}
+
+/// A shadow variant that has been identified as a promotion candidate.
+#[derive(Debug, Clone)]
+pub struct PromotionCandidate {
+    pub symbol: String,
+    pub strategy_name: String,
+    pub variant_name: String,
+    pub variant_params: crate::Params,
+    pub variant_score: f64,
+    pub variant_pnl_pct: f64,
+    pub variant_max_dd_pct: f64,
+    pub variant_trade_count: usize,
+    pub live_score: f64,
+    pub margin: f64,
+    pub timestamp_ms: u64,
+}
+
+/// Decision outcome for a promotion candidate.
+#[derive(Debug, Clone)]
+pub enum PromotionDecision {
+    Approve,
+    Reject { reason: String },
+    /// Fall back to manual mode (ask user via Telegram).
+    Defer,
+}
+
+/// Recorded promotion event (for history / audit trail).
+#[derive(Debug, Clone)]
+pub struct PromotionRecord {
+    pub timestamp_ms: u64,
+    pub symbol: String,
+    pub strategy_name: String,
+    pub from_variant: String,
+    pub to_variant: String,
+    pub from_score: f64,
+    pub to_score: f64,
+    pub mode: String,
+    pub approved: bool,
 }
 
 impl StratEntry {
@@ -512,5 +598,70 @@ mod tests {
         assert_eq!(sc.report_interval_secs, 60);
         assert!(sc.variants.is_empty());
         assert!(sc.ranges.is_empty());
+        assert!(sc.promotion.is_none());
+    }
+
+    // ── Promotion config tests ────────────────────────────────────
+
+    #[test]
+    fn promotion_config_defaults() {
+        let json = r#"{}"#;
+        let pc: PromotionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(pc.mode, "off");
+        assert!(!pc.is_enabled());
+        assert_eq!(pc.min_score, 0.0);
+        assert_eq!(pc.min_margin, 0.3);
+        assert_eq!(pc.max_drawdown_pct, 15.0);
+        assert!(pc.require_no_position);
+        assert_eq!(pc.cooldown_secs, 3600);
+        assert!(pc.track_live_as_variant);
+        assert_eq!(pc.max_promotions_per_window, 1);
+    }
+
+    #[test]
+    fn promotion_config_auto() {
+        let json = r#"{
+            "mode": "auto",
+            "minScore": 1.5,
+            "minMargin": 0.5,
+            "maxDrawdownPct": 10.0,
+            "cooldownSecs": 7200,
+            "maxPromotionsPerWindow": 2
+        }"#;
+        let pc: PromotionConfig = serde_json::from_str(json).unwrap();
+        assert!(pc.is_enabled());
+        assert_eq!(pc.mode, "auto");
+        assert_eq!(pc.min_score, 1.5);
+        assert_eq!(pc.min_margin, 0.5);
+        assert_eq!(pc.max_drawdown_pct, 10.0);
+        assert_eq!(pc.cooldown_secs, 7200);
+        assert_eq!(pc.max_promotions_per_window, 2);
+    }
+
+    #[test]
+    fn shadow_config_with_promotion() {
+        let json = r#"{
+            "enabled": true,
+            "evaluationWindowSecs": 3600,
+            "minTrades": 5,
+            "reportIntervalSecs": 30,
+            "promotion": {
+                "mode": "manual",
+                "minScore": 2.0,
+                "minMargin": 0.3
+            }
+        }"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        assert!(sc.promotion.is_some());
+        let pc = sc.promotion.unwrap();
+        assert_eq!(pc.mode, "manual");
+        assert_eq!(pc.min_score, 2.0);
+    }
+
+    #[test]
+    fn shadow_config_without_promotion() {
+        let json = r#"{"enabled": true}"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        assert!(sc.promotion.is_none());
     }
 }
