@@ -1,4 +1,7 @@
+pub mod batch;
+
 use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef};
+pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchFactory, compute_score};
 
 // ---------------------------------------------------------------------------
 // Order / Exit types
@@ -294,10 +297,14 @@ pub struct StrategyPlugin {
     pub name_len: usize,
     /// Factory function that creates strategy instances from parameters.
     pub factory: StrategyFactory,
+    /// Optional batch factory for SoA shadow/sweep execution.
+    /// If `Some`, the shadow engine uses batch mode (~1000x throughput).
+    /// `None` → generic per-variant mode (any strategy).
+    pub batch_factory: Option<BatchFactory>,
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 2;
+pub const STRATEGY_ABI_VERSION: u32 = 3;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
@@ -311,6 +318,7 @@ unsafe impl Sync for StrategyPlugin {}
 /// ```
 ///
 /// This exports a C-compatible entry point that the `tradectl` CLI loads at runtime.
+/// For strategies with a SoA batch implementation, use [`declare_batch_strategy!`] instead.
 #[macro_export]
 macro_rules! declare_strategy {
     ($name:expr, $factory:expr) => {
@@ -322,6 +330,36 @@ macro_rules! declare_strategy {
                 name: NAME.as_ptr(),
                 name_len: NAME.len(),
                 factory: |params| ::std::boxed::Box::new($factory(params)),
+                batch_factory: None,
+            }
+        }
+    };
+}
+
+/// Declare a strategy plugin with both single-instance and SoA batch factories.
+///
+/// The batch factory enables ~1000x throughput for shadow parameter optimization.
+/// ```rust,ignore
+/// tradectl_sdk::declare_batch_strategy!(
+///     "bounce-back",
+///     BounceBack::new,
+///     BounceBackBatch::new,
+/// );
+/// ```
+#[macro_export]
+macro_rules! declare_batch_strategy {
+    ($name:expr, $factory:expr, $batch_factory:expr) => {
+        #[no_mangle]
+        pub extern "C" fn tradectl_strategy() -> $crate::strategy::StrategyPlugin {
+            const NAME: &[u8] = $name.as_bytes();
+            $crate::strategy::StrategyPlugin {
+                abi_version: $crate::strategy::STRATEGY_ABI_VERSION,
+                name: NAME.as_ptr(),
+                name_len: NAME.len(),
+                factory: |params| ::std::boxed::Box::new($factory(params)),
+                batch_factory: Some(|params, config, max_pos| {
+                    ::std::boxed::Box::new($batch_factory(params, config, max_pos))
+                }),
             }
         }
     };
