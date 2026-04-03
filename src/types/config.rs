@@ -24,6 +24,15 @@ pub struct BotConfig {
     /// max leverage below the account's cached value. Default: true.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
+    /// MCP server configuration (tools-only, no LLM dependency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpConfig>,
+    /// AI / LLM configuration (Telegram agent, on-demand explanations).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiConfig>,
+    /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
+    #[serde(skip)]
+    pub strategy_docs: HashMap<String, String>,
 }
 
 /// Paper trading emulation settings.
@@ -37,6 +46,72 @@ pub struct PaperSettings {
     #[serde(default)]
     pub jitter_ms: u64,
 }
+
+/// MCP server configuration (tools-only, no LLM dependency).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mcp_host")]
+    pub host: String,
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_mcp_host(),
+            port: default_mcp_port(),
+        }
+    }
+}
+
+fn default_mcp_host() -> String { "127.0.0.1".into() }
+fn default_mcp_port() -> u16 { 9101 }
+
+/// AI / LLM configuration (Telegram agent, on-demand explanations).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConfig {
+    /// LLM provider: "anthropic", "openai", "ollama".
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Environment variable name holding the API key (not the key itself).
+    #[serde(default)]
+    pub api_key_env: String,
+    /// Model identifier (e.g. "claude-sonnet-4-20250514", "gpt-4o", "llama3").
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// Max tokens for LLM responses. Default: 200.
+    #[serde(default = "default_ai_max_tokens")]
+    pub max_tokens: u32,
+    /// Base URL override (for Ollama or custom endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Enable Telegram AI agent (free-text Q&A in chat). Default: false.
+    #[serde(default)]
+    pub telegram_agent: bool,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_ai_provider(),
+            api_key_env: String::new(),
+            model: default_ai_model(),
+            max_tokens: default_ai_max_tokens(),
+            base_url: None,
+            telegram_agent: false,
+        }
+    }
+}
+
+fn default_ai_provider() -> String { "anthropic".into() }
+fn default_ai_model() -> String { "claude-sonnet-4-20250514".into() }
+fn default_ai_max_tokens() -> u32 { 200 }
 
 /// Monitor WebSocket server settings.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
