@@ -287,7 +287,26 @@ impl BotState {
 
     /// Get bot metadata.
     pub async fn get_bot_meta(&self) -> BotMeta {
-        self.meta.read().await.clone()
+        let mut meta = self.meta.read().await.clone();
+        // Compute uptime dynamically from started_at_ms
+        if meta.started_at_ms > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            meta.uptime_secs = now_ms.saturating_sub(meta.started_at_ms) / 1000;
+        }
+        meta
+    }
+
+    /// Update balance in bot metadata (called on fill or periodically).
+    pub async fn update_balance(&self, balance: f64) {
+        self.meta.write().await.balance = balance;
+    }
+
+    /// Increment trade count in bot metadata.
+    pub async fn increment_trade_count(&self) {
+        self.meta.write().await.trade_count += 1;
     }
 
     /// Get active orders, optionally filtered by symbol.
