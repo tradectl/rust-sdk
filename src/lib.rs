@@ -2,6 +2,7 @@ pub mod types;
 pub mod strategy;
 pub mod exchange;
 pub mod runner;
+pub mod bot_state;
 #[cfg(feature = "monitor")]
 pub mod monitor;
 #[cfg(feature = "runner")]
