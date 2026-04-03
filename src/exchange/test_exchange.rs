@@ -473,6 +473,7 @@ impl MarketAdapter for TestExchange {
                 leverage: self.get_leverage(&order.symbol),
                 fees: self.fees,
                 actual_fees: None,
+                exit_is_maker: order.order_type == OrderType::Limit,
             }),
             MarketType::Inverse => {
                 let contract_size = self
@@ -490,6 +491,7 @@ impl MarketAdapter for TestExchange {
                     contract_size,
                     fees: self.fees,
                     actual_fees_coin: None,
+                    exit_is_maker: order.order_type == OrderType::Limit,
                 })
             }
             MarketType::Spot => calculate_spot_profit(&SpotProfitParams {
@@ -499,6 +501,7 @@ impl MarketAdapter for TestExchange {
                 quantity: order.filled_quantity,
                 fees: self.fees,
                 actual_fees: None,
+                exit_is_maker: order.order_type == OrderType::Limit,
             }),
         }
     }

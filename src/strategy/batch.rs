@@ -4,7 +4,7 @@
 //! thousands of parameter variants per event in a single pass, enabling
 //! ~1000x throughput improvement over per-variant [`Strategy`] instances.
 
-use crate::types::{TickerEvent, TradeEvent, Params};
+use crate::types::{TickerEvent, TradeEvent, Params, MarketType};
 
 // ---------------------------------------------------------------------------
 // Config + Result
@@ -24,6 +24,11 @@ pub struct BatchConfig {
     /// Stop-loss activation delay in milliseconds after entry fill.
     /// Matches the live runner's SL_DELAY (typically 3000ms).
     pub sl_delay_ms: u64,
+    /// Market type — determines PnL calculation (linear vs inverse).
+    pub market_type: MarketType,
+    /// Contract size for inverse contracts (e.g. 10 for BNBUSD_PERP).
+    /// Ignored for linear/spot.
+    pub contract_size: f64,
 }
 
 impl Default for BatchConfig {
@@ -36,6 +41,8 @@ impl Default for BatchConfig {
             leverage: 1.0,
             latency_ms: 0,
             sl_delay_ms: 0,
+            market_type: MarketType::Linear,
+            contract_size: 0.0,
         }
     }
 }
