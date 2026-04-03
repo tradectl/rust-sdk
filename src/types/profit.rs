@@ -25,6 +25,8 @@ pub struct LinearProfitParams {
     pub fees: MarketFees,
     /// Actual total commission (entry + exit) from exchange. Overrides rate-based estimate.
     pub actual_fees: Option<f64>,
+    /// True if exit was a limit fill (maker fee). False (default) = taker fee for exit.
+    pub exit_is_maker: bool,
 }
 
 pub struct InverseProfitParams {
@@ -37,6 +39,8 @@ pub struct InverseProfitParams {
     pub fees: MarketFees,
     /// Actual total commission (entry + exit) in coin terms. Overrides rate-based estimate.
     pub actual_fees_coin: Option<f64>,
+    /// True if exit was a limit fill (maker fee). False (default) = taker fee for exit.
+    pub exit_is_maker: bool,
 }
 
 pub struct SpotProfitParams {
@@ -47,6 +51,8 @@ pub struct SpotProfitParams {
     pub fees: MarketFees,
     /// Actual total commission (entry + exit) from exchange. Overrides rate-based estimate.
     pub actual_fees: Option<f64>,
+    /// True if exit was a limit fill (maker fee). False (default) = taker fee for exit.
+    pub exit_is_maker: bool,
 }
 
 fn direction(side: OrderSide) -> f64 {
@@ -80,7 +86,8 @@ pub fn calculate_linear_profit(p: &LinearProfitParams) -> ProfitResult {
         actual
     } else {
         let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
-        let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
+        let exit_rate = if p.exit_is_maker { p.fees.maker_rate } else { p.fees.taker_rate };
+        let exit_fee = (p.quantity * p.exit_price).abs() * exit_rate;
         entry_fee + exit_fee
     };
 
@@ -140,7 +147,8 @@ pub fn calculate_inverse_profit(p: &InverseProfitParams) -> ProfitResult {
     } else {
         let notional_entry = p.contract_size * p.quantity / p.entry_price;
         let notional_exit = p.contract_size * p.quantity / p.exit_price;
-        notional_entry.abs() * p.fees.maker_rate + notional_exit.abs() * p.fees.taker_rate
+        let exit_rate = if p.exit_is_maker { p.fees.maker_rate } else { p.fees.taker_rate };
+        notional_entry.abs() * p.fees.maker_rate + notional_exit.abs() * exit_rate
     };
 
     let net_pnl_coin = pnl_coin - total_fees_coin;
@@ -188,7 +196,8 @@ pub fn calculate_spot_profit(p: &SpotProfitParams) -> ProfitResult {
         actual
     } else {
         let entry_fee = (p.quantity * p.entry_price).abs() * p.fees.maker_rate;
-        let exit_fee = (p.quantity * p.exit_price).abs() * p.fees.taker_rate;
+        let exit_rate = if p.exit_is_maker { p.fees.maker_rate } else { p.fees.taker_rate };
+        let exit_fee = (p.quantity * p.exit_price).abs() * exit_rate;
         entry_fee + exit_fee
     };
 
@@ -227,6 +236,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert!((r.profit_usd - 969.6).abs() < 0.01);
         assert!((r.profit - 19.392).abs() < 0.01);
@@ -243,6 +253,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert!((r.profit_usd - 970.4).abs() < 0.01);
         assert!(r.profit > 0.0);
@@ -258,6 +269,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert!((r.profit_usd - (-1029.6)).abs() < 0.01);
         assert!(r.profit < 0.0);
@@ -274,6 +286,7 @@ mod tests {
             contract_size: 100.0,
             fees: TEST_FEES,
             actual_fees_coin: None,
+            exit_is_maker: false,
         });
         assert!(r.profit_usd > 0.0);
         assert!(r.profit > 0.0);
@@ -291,6 +304,7 @@ mod tests {
             contract_size: 100.0,
             fees: TEST_FEES,
             actual_fees_coin: None,
+            exit_is_maker: false,
         });
         assert!(r.profit_usd < 0.0);
         assert!(r.profit < 0.0);
@@ -305,6 +319,7 @@ mod tests {
             quantity: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert!((r.profit_usd - 99.36).abs() < 0.01);
         assert!((r.profit - 9.936).abs() < 0.01);
@@ -321,6 +336,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
@@ -337,6 +353,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -351,6 +368,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -365,6 +383,7 @@ mod tests {
             leverage: 10.0,
             fees: MarketFees { maker_rate: -0.1, taker_rate: 0.0004 },
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -380,6 +399,7 @@ mod tests {
             contract_size: 0.0,
             fees: TEST_FEES,
             actual_fees_coin: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -393,6 +413,7 @@ mod tests {
             quantity: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
     }
@@ -408,6 +429,7 @@ mod tests {
             contract_size: 100.0,
             fees: TEST_FEES,
             actual_fees_coin: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
@@ -422,6 +444,7 @@ mod tests {
             quantity: 0.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         assert_eq!(r.profit, 0.0);
         assert_eq!(r.profit_usd, 0.0);
@@ -440,6 +463,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         let actual = calculate_linear_profit(&LinearProfitParams {
             side: OrderSide::Buy,
@@ -449,6 +473,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: Some(50.0), // higher than estimated ~30.4
+            exit_is_maker: false,
         });
         assert!((estimated.fees - 30.4).abs() < 0.01);
         assert_eq!(actual.fees, 50.0);
@@ -467,6 +492,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: Some(0.0),
+            exit_is_maker: false,
         });
         assert_eq!(r.fees, 0.0);
         assert!((r.profit_usd - 1000.0).abs() < 0.01); // pure PnL, no fees
@@ -483,6 +509,7 @@ mod tests {
             contract_size: 100.0,
             fees: TEST_FEES,
             actual_fees_coin: None,
+            exit_is_maker: false,
         });
         let actual = calculate_inverse_profit(&InverseProfitParams {
             side: OrderSide::Buy,
@@ -493,6 +520,7 @@ mod tests {
             contract_size: 100.0,
             fees: TEST_FEES,
             actual_fees_coin: Some(0.01),
+            exit_is_maker: false,
         });
         assert!(estimated.fees > 0.0);
         assert!((actual.fees - 0.01 * 51000.0).abs() < 0.01); // coin fees * exit price
@@ -508,6 +536,7 @@ mod tests {
             quantity: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         let actual = calculate_spot_profit(&SpotProfitParams {
             side: OrderSide::Buy,
@@ -516,6 +545,7 @@ mod tests {
             quantity: 10.0,
             fees: TEST_FEES,
             actual_fees: Some(1.0),
+            exit_is_maker: false,
         });
         assert!((estimated.fees - 0.64).abs() < 0.01);
         assert_eq!(actual.fees, 1.0);
@@ -533,6 +563,7 @@ mod tests {
             leverage: 10.0,
             fees: TEST_FEES,
             actual_fees: None,
+            exit_is_maker: false,
         });
         // Manual: entry_fee = 50000 * 0.0002 = 10, exit_fee = 51000 * 0.0004 = 20.4
         assert!((with_none.fees - 30.4).abs() < 0.01);
