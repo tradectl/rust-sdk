@@ -5,6 +5,7 @@
 //! ~1000x throughput improvement over per-variant [`Strategy`] instances.
 
 use crate::types::{TickerEvent, TradeEvent, Params, MarketType};
+use super::batch_exchange::BatchExchange;
 
 // ---------------------------------------------------------------------------
 // Config + Result
@@ -18,9 +19,10 @@ pub struct BatchConfig {
     pub maker_fee: f64,
     pub slippage_pct: f64,
     pub leverage: f64,
-    /// Simulated exchange round-trip latency in milliseconds.
-    /// Entry fills are delayed by this amount (0 = instant fill).
+    /// Base simulated exchange round-trip latency in milliseconds (0 = instant).
     pub latency_ms: u64,
+    /// Random jitter range in milliseconds. Actual latency = `latency_ms + rand(0, jitter_ms)`.
+    pub jitter_ms: u64,
     /// Stop-loss activation delay in milliseconds after entry fill.
     /// Matches the live runner's SL_DELAY (typically 3000ms).
     pub sl_delay_ms: u64,
@@ -40,11 +42,21 @@ impl Default for BatchConfig {
             slippage_pct: 0.0001,
             leverage: 1.0,
             latency_ms: 0,
+            jitter_ms: 0,
             sl_delay_ms: 0,
             market_type: MarketType::Linear,
             contract_size: 0.0,
         }
     }
+}
+
+/// Diagnostic snapshot for shadow engine reporting.
+#[derive(Debug, Clone, Default)]
+pub struct BatchDiagnostics {
+    /// Number of trials with a pending entry (entry_price > 0).
+    pub entries_active: usize,
+    /// Number of trials with at least one open position.
+    pub positions_open: usize,
 }
 
 /// Per-trial result from a batch strategy run.
@@ -80,18 +92,42 @@ pub struct BatchResult {
 /// declare_batch_strategy!("bounce-back", BounceBack::new, BounceBackBatch::new);
 /// ```
 pub trait BatchStrategy: Send {
-    /// Process a book ticker event across all trials.
+    /// Access the underlying exchange engine.
+    fn exchange(&self) -> &BatchExchange;
+    /// Mutable access to the underlying exchange engine.
+    fn exchange_mut(&mut self) -> &mut BatchExchange;
+
+    /// Process a book ticker event across all trials (strategy-specific).
     fn process_ticker(&mut self, ticker: &TickerEvent);
+
     /// Check a trade event for entry fills and exit triggers across all trials.
-    fn check_trade(&mut self, trade: &TradeEvent);
+    fn check_trade(&mut self, trade: &TradeEvent) {
+        self.exchange_mut().check_trade(trade);
+    }
     /// Force-close all open positions at the given bid price.
-    fn force_close_all(&mut self, bid_price: f64);
+    fn force_close_all(&mut self, bid_price: f64) {
+        self.exchange_mut().force_close_all(bid_price);
+    }
     /// Collect results for all trials.
-    fn results(&self) -> Vec<BatchResult>;
+    fn results(&self) -> Vec<BatchResult> {
+        self.exchange().results()
+    }
     /// Number of trials in this batch.
-    fn trial_count(&self) -> usize;
+    fn trial_count(&self) -> usize {
+        self.exchange().n
+    }
     /// Reset all trial state for a new evaluation window (shadow mode).
-    fn reset(&mut self);
+    fn reset(&mut self) {
+        self.exchange_mut().reset();
+    }
+    /// Return diagnostic counters for shadow engine reporting.
+    fn diagnostics(&self) -> BatchDiagnostics {
+        self.exchange().diagnostics()
+    }
+    /// Estimated heap memory usage in bytes for exchange arrays.
+    fn estimated_ram_bytes(&self) -> usize {
+        self.exchange().estimated_ram_bytes()
+    }
 }
 
 // ---------------------------------------------------------------------------

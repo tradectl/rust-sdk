@@ -277,13 +277,43 @@ pub struct ShadowConfig {
     /// How often to log/broadcast shadow results in seconds. Default: 60.
     #[serde(default = "default_report_interval")]
     pub report_interval_secs: u64,
+    /// Shadow-only mode: suppress live entries until a promotion is applied.
+    /// Shadow variants paper-trade normally; real orders only start after promotion.
+    #[serde(default)]
+    pub shadow_only: bool,
     /// Promotion configuration for auto/manual/agent param rotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion: Option<PromotionConfig>,
+    /// Constraints between range parameters (e.g. `chaseSensitivity < entryDistance`).
+    /// Applied during [`expand_ranges`] to prune invalid combinations.
+    #[serde(default)]
+    pub constraints: Vec<ShadowConstraint>,
+    /// Parameter names to collapse when variant groups are idle (zero trades).
+    /// For each listed param, groups sharing all other params are collapsed to
+    /// the minimum value only. Reduces active variant count at runtime.
+    /// Example: `["takeProfit"]` — only test min TP when entry hasn't triggered.
+    #[serde(default)]
+    pub prune_when_idle: Vec<String>,
     /// Inline parameter ranges (captured via serde flatten).
     /// Keys with `{"min": f64, "max": f64, "step": f64}` values are treated as ranges.
     #[serde(flatten, default)]
     pub ranges: HashMap<String, serde_json::Value>,
+}
+
+/// A constraint between two range parameters.
+///
+/// During [`ShadowConfig::expand_ranges`], combinations where the constraint
+/// is violated are pruned from the cartesian product.
+///
+/// ```json
+/// { "left": "chaseSensitivity", "op": "<", "right": "entryDistance" }
+/// ```
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ShadowConstraint {
+    pub left: String,
+    /// Comparison operator: `"<"`, `"<="`, `">"`, `">="`.
+    pub op: String,
+    pub right: String,
 }
 
 impl ShadowConfig {
@@ -339,6 +369,35 @@ impl ShadowConfig {
                 }
             }
             combos = next;
+        }
+
+        // Filter combos by constraints (e.g. chaseSensitivity < entryDistance)
+        let before = combos.len();
+        if !self.constraints.is_empty() {
+            combos.retain(|combo| {
+                for c in &self.constraints {
+                    let lv = combo.iter().find(|(k, _)| *k == c.left.as_str()).map(|(_, v)| *v);
+                    let rv = combo.iter().find(|(k, _)| *k == c.right.as_str()).map(|(_, v)| *v);
+                    if let (Some(l), Some(r)) = (lv, rv) {
+                        let ok = match c.op.as_str() {
+                            "<" => l < r,
+                            "<=" => l <= r,
+                            ">" => l > r,
+                            ">=" => l >= r,
+                            _ => true,
+                        };
+                        if !ok { return false; }
+                    }
+                }
+                true
+            });
+        }
+        let after = combos.len();
+        if before != after {
+            log::info!(
+                "[shadow] constraints pruned {} → {} variants (removed {})",
+                before, after, before - after,
+            );
         }
 
         // Convert to ShadowVariant and append
@@ -674,6 +733,84 @@ mod tests {
         assert!(sc.variants.is_empty());
         assert!(sc.ranges.is_empty());
         assert!(sc.promotion.is_none());
+        assert!(sc.constraints.is_empty());
+        assert!(sc.prune_when_idle.is_empty());
+    }
+
+    #[test]
+    fn shadow_constraints_prune_invalid_combos() {
+        let json = r#"{
+            "enabled": true,
+            "entryDistance": {"min": 0.10, "max": 0.30, "step": 0.10},
+            "chaseSensitivity": {"min": 0.10, "max": 0.30, "step": 0.10},
+            "constraints": [{"left": "chaseSensitivity", "op": "<", "right": "entryDistance"}]
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+
+        // ED: 0.10, 0.20, 0.30 (3 values)
+        // CS: 0.10, 0.20, 0.30 (3 values)
+        // Without constraints: 3 × 3 = 9
+        // With CS < ED:
+        //   ED=0.10 → no valid CS (0 combos)
+        //   ED=0.20 → CS=0.10 (1 combo)
+        //   ED=0.30 → CS=0.10, 0.20 (2 combos)
+        // Total = 3 combos
+        assert_eq!(sc.variants.len(), 3);
+
+        // Verify the combos
+        let combos: Vec<(f64, f64)> = sc.variants.iter().map(|v| {
+            let cs = v.params["chaseSensitivity"].as_f64().unwrap();
+            let ed = v.params["entryDistance"].as_f64().unwrap();
+            (cs, ed)
+        }).collect();
+        assert!(combos.iter().all(|(cs, ed)| cs < ed));
+    }
+
+    #[test]
+    fn shadow_constraints_multiple() {
+        let json = r#"{
+            "enabled": true,
+            "entryDistance": {"min": 0.10, "max": 0.30, "step": 0.10},
+            "chaseSensitivity": {"min": 0.10, "max": 0.30, "step": 0.10},
+            "takeProfit": {"min": 0.10, "max": 0.30, "step": 0.10},
+            "constraints": [
+                {"left": "chaseSensitivity", "op": "<", "right": "entryDistance"},
+                {"left": "takeProfit", "op": "<", "right": "entryDistance"}
+            ]
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+
+        // Every variant must satisfy both CS < ED and TP < ED
+        for v in &sc.variants {
+            let cs = v.params["chaseSensitivity"].as_f64().unwrap();
+            let ed = v.params["entryDistance"].as_f64().unwrap();
+            let tp = v.params["takeProfit"].as_f64().unwrap();
+            assert!(cs < ed, "cs={} < ed={}", cs, ed);
+            assert!(tp < ed, "tp={} < ed={}", tp, ed);
+        }
+
+        // ED=0.10 → 0 (no valid CS or TP)
+        // ED=0.20 → CS=0.10, TP=0.10 → 1×1 = 1
+        // ED=0.30 → CS=0.10,0.20, TP=0.10,0.20 → 2×2 = 4
+        // Total = 5
+        assert_eq!(sc.variants.len(), 5);
+    }
+
+    #[test]
+    fn shadow_constraints_no_match_prunes_all() {
+        // All combos have TP >= ED, so constraint TP < ED prunes everything
+        let json = r#"{
+            "enabled": true,
+            "entryDistance": {"min": 0.10, "max": 0.10, "step": 0.10},
+            "takeProfit": {"min": 0.10, "max": 0.20, "step": 0.10},
+            "constraints": [{"left": "takeProfit", "op": "<", "right": "entryDistance"}]
+        }"#;
+        let mut sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        sc.expand_ranges();
+        // ED=0.10, TP=0.10 or 0.20 — neither is < 0.10
+        assert_eq!(sc.variants.len(), 0);
     }
 
     // ── Promotion config tests ────────────────────────────────────
