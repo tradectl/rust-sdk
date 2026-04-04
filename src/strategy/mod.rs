@@ -1,7 +1,9 @@
 pub mod batch;
+pub mod batch_exchange;
 
 use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef};
-pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchFactory, compute_score};
+pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchDiagnostics, BatchFactory, compute_score};
+pub use batch_exchange::BatchExchange;
 
 // ---------------------------------------------------------------------------
 // Order / Exit types
