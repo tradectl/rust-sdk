@@ -167,6 +167,10 @@ pub struct ApiConfig {
     /// OKX / Bitget passphrase (required for these exchanges).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
+    /// Use WebSocket API for order operations (lower latency than REST).
+    /// Supported by Binance only. Default: false.
+    #[serde(default)]
+    pub ws: bool,
 }
 
 impl Default for ApiConfig {
@@ -178,6 +182,7 @@ impl Default for ApiConfig {
             wallet_address: None,
             private_key: None,
             passphrase: None,
+            ws: false,
         }
     }
 }
