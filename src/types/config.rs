@@ -303,6 +303,12 @@ pub struct ShadowConfig {
     /// Keys with `{"min": f64, "max": f64, "step": f64}` values are treated as ranges.
     #[serde(flatten, default)]
     pub ranges: HashMap<String, serde_json::Value>,
+    /// Staleness detection for live parameters (opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staleness: Option<StalenessConfig>,
+    /// Edge decay detection and kill switch (opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_decay: Option<EdgeDecayConfig>,
 }
 
 /// A constraint between two range parameters.
@@ -497,6 +503,8 @@ pub struct PromotionCandidate {
     pub margin: f64,
     pub timestamp_ms: u64,
     pub variant_sharpe: f64,
+    pub live_params_age_secs: Option<u64>,
+    pub live_score_trend: Option<Vec<f64>>,
 }
 
 /// Decision outcome for a promotion candidate.
@@ -507,6 +515,45 @@ pub enum PromotionDecision {
     /// Fall back to manual mode (ask user via Telegram).
     Defer,
 }
+
+/// Staleness detection for live parameters.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StalenessConfig {
+    /// Number of recent evaluation windows to track for rolling score. Default: 3.
+    #[serde(default = "default_staleness_window_count")]
+    pub window_count: usize,
+    /// Alert when rolling live score drops below this. Default: 0.0.
+    #[serde(default)]
+    pub score_threshold: f64,
+    /// Alert when live score declines by this % from rolling peak. Default: 50.0.
+    #[serde(default = "default_decline_pct")]
+    pub decline_pct: f64,
+    /// Alert when live params have been active longer than this (seconds). 0 = disabled.
+    #[serde(default)]
+    pub max_age_secs: u64,
+}
+
+fn default_staleness_window_count() -> usize { 3 }
+fn default_decline_pct() -> f64 { 50.0 }
+
+/// Edge decay detection and kill switch.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeDecayConfig {
+    /// Score threshold: both live and best variant must be below this. Default: 0.0.
+    #[serde(default)]
+    pub score_threshold: f64,
+    /// Consecutive evaluation windows below threshold before action. Default: 3.
+    #[serde(default = "default_consecutive_windows")]
+    pub consecutive_windows: usize,
+    /// Action: `"pause"` (suppress entries) or `"notify"` (alert only). Default: `"pause"`.
+    #[serde(default = "default_edge_action")]
+    pub action: String,
+}
+
+fn default_consecutive_windows() -> usize { 3 }
+fn default_edge_action() -> String { "pause".to_string() }
 
 /// Recorded promotion event (for history / audit trail).
 #[derive(Debug, Clone)]
@@ -903,5 +950,54 @@ mod tests {
         let json = r#"{"enabled": true}"#;
         let sc: ShadowConfig = serde_json::from_str(json).unwrap();
         assert!(sc.promotion.is_none());
+        assert!(sc.staleness.is_none());
+        assert!(sc.edge_decay.is_none());
+    }
+
+    #[test]
+    fn staleness_config_defaults() {
+        let json = r#"{}"#;
+        let sc: StalenessConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(sc.window_count, 3);
+        assert_eq!(sc.score_threshold, 0.0);
+        assert_eq!(sc.decline_pct, 50.0);
+        assert_eq!(sc.max_age_secs, 0);
+    }
+
+    #[test]
+    fn edge_decay_config_defaults() {
+        let json = r#"{}"#;
+        let ec: EdgeDecayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(ec.score_threshold, 0.0);
+        assert_eq!(ec.consecutive_windows, 3);
+        assert_eq!(ec.action, "pause");
+    }
+
+    #[test]
+    fn shadow_config_with_staleness_and_edge_decay() {
+        let json = r#"{
+            "enabled": true,
+            "staleness": {
+                "windowCount": 5,
+                "scoreThreshold": 0.5,
+                "declinePct": 30.0,
+                "maxAgeSecs": 172800
+            },
+            "edgeDecay": {
+                "scoreThreshold": -1.0,
+                "consecutiveWindows": 4,
+                "action": "notify"
+            }
+        }"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        let st = sc.staleness.unwrap();
+        assert_eq!(st.window_count, 5);
+        assert_eq!(st.score_threshold, 0.5);
+        assert_eq!(st.decline_pct, 30.0);
+        assert_eq!(st.max_age_secs, 172800);
+        let ed = sc.edge_decay.unwrap();
+        assert_eq!(ed.score_threshold, -1.0);
+        assert_eq!(ed.consecutive_windows, 4);
+        assert_eq!(ed.action, "notify");
     }
 }
