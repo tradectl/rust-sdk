@@ -474,6 +474,22 @@ pub struct PromotionConfig {
     /// Minimum Sharpe ratio (mean_return / std_dev) for promotion eligibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_sharpe: Option<f64>,
+    // ── Burst mode fields ────────────────────────────────────────
+    /// Completed round-trips needed to trigger burst promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_trades: Option<u32>,
+    /// Time window for burst detection (ms from variant's first trade in window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_window_ms: Option<u64>,
+    /// Consecutive losses on promoted variant before demotion back to shadow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_losses: Option<u32>,
+    /// Penalty duration (seconds) after demotion — variant excluded from re-promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_penalty_secs: Option<u64>,
+    /// Max concurrent promoted variants per symbol. Default: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_promotions: Option<usize>,
 }
 
 fn default_promotion_mode() -> String { "off".to_string() }
@@ -514,6 +530,16 @@ pub enum PromotionDecision {
     Reject { reason: String },
     /// Fall back to manual mode (ask user via Telegram).
     Defer,
+}
+
+/// Feedback from a demoted promoted variant back to the shadow engine.
+#[derive(Debug, Clone)]
+pub struct PromotionDemoted {
+    pub symbol: String,
+    pub variant_name: String,
+    pub variant_params: crate::Params,
+    pub reason: String,
+    pub penalty_secs: u64,
 }
 
 /// Staleness detection for live parameters.
