@@ -461,6 +461,13 @@ pub struct PromotionConfig {
     /// Maximum promotions per evaluation window. Default: 1.
     #[serde(default = "default_max_promotions")]
     pub max_promotions_per_window: usize,
+    /// Minimum trades specifically for promotion eligibility.
+    /// When set, overrides shadow.minTrades for promotion decisions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_trades_for_promotion: Option<usize>,
+    /// Minimum Sharpe ratio (mean_return / std_dev) for promotion eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sharpe: Option<f64>,
 }
 
 fn default_promotion_mode() -> String { "off".to_string() }
@@ -489,6 +496,7 @@ pub struct PromotionCandidate {
     pub live_score: f64,
     pub margin: f64,
     pub timestamp_ms: u64,
+    pub variant_sharpe: f64,
 }
 
 /// Decision outcome for a promotion candidate.
@@ -833,6 +841,8 @@ mod tests {
         assert_eq!(pc.cooldown_secs, 3600);
         assert!(pc.track_live_as_variant);
         assert_eq!(pc.max_promotions_per_window, 1);
+        assert!(pc.min_trades_for_promotion.is_none());
+        assert!(pc.min_sharpe.is_none());
     }
 
     #[test]
@@ -873,6 +883,19 @@ mod tests {
         let pc = sc.promotion.unwrap();
         assert_eq!(pc.mode, "manual");
         assert_eq!(pc.min_score, 2.0);
+    }
+
+    #[test]
+    fn promotion_config_statistical_fields() {
+        let json = r#"{
+            "mode": "auto",
+            "minScore": 0.5,
+            "minTradesForPromotion": 20,
+            "minSharpe": 0.5
+        }"#;
+        let pc: PromotionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(pc.min_trades_for_promotion, Some(20));
+        assert_eq!(pc.min_sharpe, Some(0.5));
     }
 
     #[test]
