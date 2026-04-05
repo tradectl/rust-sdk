@@ -162,7 +162,7 @@ impl BatchExchange {
         let ts = trade.timestamp_ms;
         let n = self.n;
         let mp = self.max_positions;
-        let latency = self.latency_ms;
+        let _latency = self.latency_ms;
         let sl_delay = self.sl_delay_ms;
 
         for i in 0..n {
@@ -327,11 +327,19 @@ impl BatchExchange {
                     let n = tc as f64;
                     let mean = self.sum_returns[i] / n;
                     let variance = (self.sum_returns_sq[i] - n * mean * mean) / (n - 1.0);
-                    let std_dev = variance.max(0.0).sqrt().max(1e-4);
-                    let sharpe = mean / std_dev;
+                    let std_dev = variance.max(0.0).sqrt();
+                    let sharpe = if std_dev < 1e-10 {
+                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
+                    } else {
+                        mean / std_dev
+                    };
                     let downside_variance = self.sum_neg_returns_sq[i] / (n - 1.0);
-                    let downside_dev = downside_variance.sqrt().max(1e-4);
-                    let sortino = mean / downside_dev;
+                    let downside_dev = downside_variance.sqrt();
+                    let sortino = if downside_dev < 1e-10 {
+                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
+                    } else {
+                        mean / downside_dev
+                    };
                     (sharpe, sortino)
                 } else {
                     (0.0, 0.0)
