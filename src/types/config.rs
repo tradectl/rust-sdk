@@ -167,6 +167,10 @@ pub struct ApiConfig {
     /// OKX / Bitget passphrase (required for these exchanges).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
+    /// Use WebSocket API for order operations (lower latency than REST).
+    /// Supported by Binance only. Default: false.
+    #[serde(default)]
+    pub ws: bool,
 }
 
 impl Default for ApiConfig {
@@ -178,6 +182,7 @@ impl Default for ApiConfig {
             wallet_address: None,
             private_key: None,
             passphrase: None,
+            ws: false,
         }
     }
 }
@@ -298,6 +303,12 @@ pub struct ShadowConfig {
     /// Keys with `{"min": f64, "max": f64, "step": f64}` values are treated as ranges.
     #[serde(flatten, default)]
     pub ranges: HashMap<String, serde_json::Value>,
+    /// Staleness detection for live parameters (opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staleness: Option<StalenessConfig>,
+    /// Edge decay detection and kill switch (opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_decay: Option<EdgeDecayConfig>,
 }
 
 /// A constraint between two range parameters.
@@ -456,6 +467,29 @@ pub struct PromotionConfig {
     /// Maximum promotions per evaluation window. Default: 1.
     #[serde(default = "default_max_promotions")]
     pub max_promotions_per_window: usize,
+    /// Minimum trades specifically for promotion eligibility.
+    /// When set, overrides shadow.minTrades for promotion decisions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_trades_for_promotion: Option<usize>,
+    /// Minimum Sharpe ratio (mean_return / std_dev) for promotion eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sharpe: Option<f64>,
+    // ── Burst mode fields ────────────────────────────────────────
+    /// Completed round-trips needed to trigger burst promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_trades: Option<u32>,
+    /// Time window for burst detection (ms from variant's first trade in window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_window_ms: Option<u64>,
+    /// Consecutive losses on promoted variant before demotion back to shadow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_losses: Option<u32>,
+    /// Penalty duration (seconds) after demotion — variant excluded from re-promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_penalty_secs: Option<u64>,
+    /// Max concurrent promoted variants per symbol. Default: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_promotions: Option<usize>,
 }
 
 fn default_promotion_mode() -> String { "off".to_string() }
@@ -484,6 +518,9 @@ pub struct PromotionCandidate {
     pub live_score: f64,
     pub margin: f64,
     pub timestamp_ms: u64,
+    pub variant_sharpe: f64,
+    pub live_params_age_secs: Option<u64>,
+    pub live_score_trend: Option<Vec<f64>>,
 }
 
 /// Decision outcome for a promotion candidate.
@@ -494,6 +531,55 @@ pub enum PromotionDecision {
     /// Fall back to manual mode (ask user via Telegram).
     Defer,
 }
+
+/// Feedback from a demoted promoted variant back to the shadow engine.
+#[derive(Debug, Clone)]
+pub struct PromotionDemoted {
+    pub symbol: String,
+    pub variant_name: String,
+    pub variant_params: crate::Params,
+    pub reason: String,
+    pub penalty_secs: u64,
+}
+
+/// Staleness detection for live parameters.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StalenessConfig {
+    /// Number of recent evaluation windows to track for rolling score. Default: 3.
+    #[serde(default = "default_staleness_window_count")]
+    pub window_count: usize,
+    /// Alert when rolling live score drops below this. Default: 0.0.
+    #[serde(default)]
+    pub score_threshold: f64,
+    /// Alert when live score declines by this % from rolling peak. Default: 50.0.
+    #[serde(default = "default_decline_pct")]
+    pub decline_pct: f64,
+    /// Alert when live params have been active longer than this (seconds). 0 = disabled.
+    #[serde(default)]
+    pub max_age_secs: u64,
+}
+
+fn default_staleness_window_count() -> usize { 3 }
+fn default_decline_pct() -> f64 { 50.0 }
+
+/// Edge decay detection and kill switch.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeDecayConfig {
+    /// Score threshold: both live and best variant must be below this. Default: 0.0.
+    #[serde(default)]
+    pub score_threshold: f64,
+    /// Consecutive evaluation windows below threshold before action. Default: 3.
+    #[serde(default = "default_consecutive_windows")]
+    pub consecutive_windows: usize,
+    /// Action: `"pause"` (suppress entries) or `"notify"` (alert only). Default: `"pause"`.
+    #[serde(default = "default_edge_action")]
+    pub action: String,
+}
+
+fn default_consecutive_windows() -> usize { 3 }
+fn default_edge_action() -> String { "pause".to_string() }
 
 /// Recorded promotion event (for history / audit trail).
 #[derive(Debug, Clone)]
@@ -828,6 +914,8 @@ mod tests {
         assert_eq!(pc.cooldown_secs, 3600);
         assert!(pc.track_live_as_variant);
         assert_eq!(pc.max_promotions_per_window, 1);
+        assert!(pc.min_trades_for_promotion.is_none());
+        assert!(pc.min_sharpe.is_none());
     }
 
     #[test]
@@ -871,9 +959,71 @@ mod tests {
     }
 
     #[test]
+    fn promotion_config_statistical_fields() {
+        let json = r#"{
+            "mode": "auto",
+            "minScore": 0.5,
+            "minTradesForPromotion": 20,
+            "minSharpe": 0.5
+        }"#;
+        let pc: PromotionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(pc.min_trades_for_promotion, Some(20));
+        assert_eq!(pc.min_sharpe, Some(0.5));
+    }
+
+    #[test]
     fn shadow_config_without_promotion() {
         let json = r#"{"enabled": true}"#;
         let sc: ShadowConfig = serde_json::from_str(json).unwrap();
         assert!(sc.promotion.is_none());
+        assert!(sc.staleness.is_none());
+        assert!(sc.edge_decay.is_none());
+    }
+
+    #[test]
+    fn staleness_config_defaults() {
+        let json = r#"{}"#;
+        let sc: StalenessConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(sc.window_count, 3);
+        assert_eq!(sc.score_threshold, 0.0);
+        assert_eq!(sc.decline_pct, 50.0);
+        assert_eq!(sc.max_age_secs, 0);
+    }
+
+    #[test]
+    fn edge_decay_config_defaults() {
+        let json = r#"{}"#;
+        let ec: EdgeDecayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(ec.score_threshold, 0.0);
+        assert_eq!(ec.consecutive_windows, 3);
+        assert_eq!(ec.action, "pause");
+    }
+
+    #[test]
+    fn shadow_config_with_staleness_and_edge_decay() {
+        let json = r#"{
+            "enabled": true,
+            "staleness": {
+                "windowCount": 5,
+                "scoreThreshold": 0.5,
+                "declinePct": 30.0,
+                "maxAgeSecs": 172800
+            },
+            "edgeDecay": {
+                "scoreThreshold": -1.0,
+                "consecutiveWindows": 4,
+                "action": "notify"
+            }
+        }"#;
+        let sc: ShadowConfig = serde_json::from_str(json).unwrap();
+        let st = sc.staleness.unwrap();
+        assert_eq!(st.window_count, 5);
+        assert_eq!(st.score_threshold, 0.5);
+        assert_eq!(st.decline_pct, 30.0);
+        assert_eq!(st.max_age_secs, 172800);
+        let ed = sc.edge_decay.unwrap();
+        assert_eq!(ed.score_threshold, -1.0);
+        assert_eq!(ed.consecutive_windows, 4);
+        assert_eq!(ed.action, "notify");
     }
 }

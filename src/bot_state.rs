@@ -29,6 +29,13 @@ pub trait TriggerEngineApi: Send + Sync {
     fn snapshot(&self) -> serde_json::Value;
 }
 
+/// Strategy control API — pause/resume entries per symbol.
+pub trait StrategyControlApi: Send + Sync {
+    fn pause(&self, symbol: &str) -> bool;
+    fn resume(&self, symbol: &str) -> bool;
+    fn is_paused(&self, symbol: &str) -> bool;
+}
+
 /// Ring buffer capacity for recent fills.
 const RECENT_FILLS_CAP: usize = 200;
 
@@ -153,6 +160,16 @@ pub struct ShadowSummarySnapshot {
     pub timestamp_ms: u64,
     pub results: Vec<ShadowResultSnapshot>,
     pub details: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_params_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_score_history: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staleness_alert: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_decay_consecutive: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
 }
 
 /// Single shadow variant result.

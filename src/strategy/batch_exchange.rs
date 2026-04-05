@@ -59,6 +59,10 @@ pub struct BatchExchange {
     sum_neg_returns_sq: Vec<f64>,
     peak_equity: Vec<f64>,
     max_drawdown: Vec<f64>,
+    /// Timestamp of first completed trade per trial (for burst detection).
+    first_trade_at: Vec<u64>,
+    /// Timestamp of most recent completed trade per trial.
+    last_trade_at: Vec<u64>,
 
     // ── Fill counters (for position tracking) ────────────────────────
     total_entries: u32,
@@ -110,6 +114,8 @@ impl BatchExchange {
             sum_neg_returns_sq: vec![0.0; n],
             peak_equity: vec![config.initial_balance; n],
             max_drawdown: vec![0.0; n],
+            first_trade_at: vec![0; n],
+            last_trade_at: vec![0; n],
             total_entries: 0,
             total_exits: 0,
             jitter_ms: config.jitter_ms,
@@ -156,7 +162,7 @@ impl BatchExchange {
         let ts = trade.timestamp_ms;
         let n = self.n;
         let mp = self.max_positions;
-        let latency = self.latency_ms;
+        let _latency = self.latency_ms;
         let sl_delay = self.sl_delay_ms;
 
         for i in 0..n {
@@ -177,11 +183,11 @@ impl BatchExchange {
                 if self.pos_active[slot] != 0 {
                     if price >= self.pos_tp_price[slot] {
                         let tp = self.pos_tp_price[slot];
-                        self.close_position_at(i, slot, tp, true);
+                        self.close_position_at(i, slot, tp, true, ts);
                         self.total_exits += 1;
                     } else if price <= self.pos_sl_price[slot] && ts >= self.pos_sl_active_at[slot] {
                         let exit = price * (1.0 - self.slippage_pct);
-                        self.close_position_at(i, slot, exit, false);
+                        self.close_position_at(i, slot, exit, false, ts);
                         self.total_exits += 1;
                     }
                 }
@@ -214,7 +220,7 @@ impl BatchExchange {
     }
 
     #[inline(always)]
-    fn close_position_at(&mut self, trial: usize, slot: usize, exit_price: f64, is_tp: bool) {
+    fn close_position_at(&mut self, trial: usize, slot: usize, exit_price: f64, is_tp: bool, timestamp_ms: u64) {
         let qty = self.pos_quantity[slot];
         let entry = self.pos_entry_price[slot];
         let exit_fee_rate = if is_tp { self.maker_fee } else { self.taker_fee };
@@ -248,6 +254,10 @@ impl BatchExchange {
         self.pos_active[slot] = 0;
         self.active_count[trial] -= 1;
         self.trade_count[trial] += 1;
+        if self.first_trade_at[trial] == 0 {
+            self.first_trade_at[trial] = timestamp_ms;
+        }
+        self.last_trade_at[trial] = timestamp_ms;
         self.total_pnl[trial] += net_pnl;
 
         if net_pnl > 0.0 {
@@ -285,7 +295,7 @@ impl BatchExchange {
             for j in 0..mp {
                 let slot = base + j;
                 if self.pos_active[slot] != 0 {
-                    self.close_position_at(i, slot, bid_price, false);
+                    self.close_position_at(i, slot, bid_price, false, 0);
                 }
             }
         }
@@ -317,11 +327,19 @@ impl BatchExchange {
                     let n = tc as f64;
                     let mean = self.sum_returns[i] / n;
                     let variance = (self.sum_returns_sq[i] - n * mean * mean) / (n - 1.0);
-                    let std_dev = variance.max(0.0).sqrt().max(1e-4);
-                    let sharpe = mean / std_dev;
+                    let std_dev = variance.max(0.0).sqrt();
+                    let sharpe = if std_dev < 1e-10 {
+                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
+                    } else {
+                        mean / std_dev
+                    };
                     let downside_variance = self.sum_neg_returns_sq[i] / (n - 1.0);
-                    let downside_dev = downside_variance.sqrt().max(1e-4);
-                    let sortino = mean / downside_dev;
+                    let downside_dev = downside_variance.sqrt();
+                    let sortino = if downside_dev < 1e-10 {
+                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
+                    } else {
+                        mean / downside_dev
+                    };
                     (sharpe, sortino)
                 } else {
                     (0.0, 0.0)
@@ -358,7 +376,7 @@ impl BatchExchange {
         // Per-trial vectors (n elements each)
         let per_trial_f64 = 4; // entry_price, pending_tp, pending_sl, balance
         let per_trial_f64_metrics = 8; // total_pnl, sum_wins, sum_losses, sum_returns, sum_returns_sq, sum_neg_returns_sq, peak_equity, max_drawdown
-        let per_trial_u64 = 1; // entry_active_at
+        let per_trial_u64 = 3; // entry_active_at, first_trade_at, last_trade_at
         let per_trial_u32 = 2; // trade_count, winning_trades
         let per_trial_u8 = 1; // active_count
         // Per-slot vectors (n * max_positions elements each)
@@ -399,7 +417,18 @@ impl BatchExchange {
         self.sum_neg_returns_sq.fill(0.0);
         self.peak_equity.fill(self.initial_balance);
         self.max_drawdown.fill(0.0);
+        self.first_trade_at.fill(0);
+        self.last_trade_at.fill(0);
         self.total_entries = 0;
         self.total_exits = 0;
     }
+
+    /// Timestamp of first completed trade for a trial (0 if no trades).
+    pub fn first_trade_at(&self, trial: usize) -> u64 { self.first_trade_at[trial] }
+
+    /// Timestamp of most recent completed trade for a trial (0 if no trades).
+    pub fn last_trade_at(&self, trial: usize) -> u64 { self.last_trade_at[trial] }
+
+    /// Current trade count for a trial.
+    pub fn trade_count(&self, trial: usize) -> u32 { self.trade_count[trial] }
 }
