@@ -85,7 +85,7 @@ pub struct AiConfig {
     /// Model identifier (e.g. "claude-sonnet-4-20250514", "gpt-4o", "llama3").
     #[serde(default = "default_ai_model")]
     pub model: String,
-    /// Max tokens for LLM responses. Default: 200.
+    /// Max tokens for LLM responses. Default: 1024.
     #[serde(default = "default_ai_max_tokens")]
     pub max_tokens: u32,
     /// Base URL override (for Ollama or custom endpoints).
@@ -111,7 +111,7 @@ impl Default for AiConfig {
 
 fn default_ai_provider() -> String { "anthropic".into() }
 fn default_ai_model() -> String { "claude-sonnet-4-20250514".into() }
-fn default_ai_max_tokens() -> u32 { 200 }
+fn default_ai_max_tokens() -> u32 { 1024 }
 
 /// Monitor WebSocket server settings.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
