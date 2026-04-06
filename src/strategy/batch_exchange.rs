@@ -32,6 +32,8 @@ pub struct BatchExchange {
     /// Pending TP/SL prices — set alongside entry, applied on fill.
     pending_tp_price: Vec<f64>,
     pending_sl_price: Vec<f64>,
+    /// Pending entry side: true = short, false = long.
+    entry_is_short: Vec<bool>,
     /// Timestamp when entry becomes active on the exchange (placement latency).
     /// 0 = entry is active and fillable. >0 = entry placed but not yet on the book.
     pub entry_active_at: Vec<u64>,
@@ -43,6 +45,8 @@ pub struct BatchExchange {
     pos_tp_price: Vec<f64>,
     pos_sl_price: Vec<f64>,
     pos_sl_active_at: Vec<u64>,
+    /// Position side: true = short, false = long.
+    pos_is_short: Vec<bool>,
 
     // ── Per-trial counters ───────────────────────────────────────────
     pub active_count: Vec<u8>,
@@ -95,6 +99,7 @@ impl BatchExchange {
             entry_price: vec![0.0; n],
             pending_tp_price: vec![0.0; n],
             pending_sl_price: vec![0.0; n],
+            entry_is_short: vec![false; n],
             entry_active_at: vec![0; n],
             pos_active: vec![0; total_slots],
             pos_entry_price: vec![0.0; total_slots],
@@ -102,6 +107,7 @@ impl BatchExchange {
             pos_tp_price: vec![0.0; total_slots],
             pos_sl_price: vec![0.0; total_slots],
             pos_sl_active_at: vec![0; total_slots],
+            pos_is_short: vec![false; total_slots],
             active_count: vec![0; n],
             balance: vec![config.initial_balance; n],
             trade_count: vec![0; n],
@@ -138,10 +144,11 @@ impl BatchExchange {
     /// Place or edit a pending entry order with exit prices.
     /// Applies placement latency + jitter. Strategy computes TP/SL from its params.
     #[inline(always)]
-    pub fn set_entry(&mut self, trial: usize, price: f64, tp_price: f64, sl_price: f64, ts: u64) {
+    pub fn set_entry(&mut self, trial: usize, price: f64, tp_price: f64, sl_price: f64, ts: u64, is_short: bool) {
         self.entry_price[trial] = price;
         self.pending_tp_price[trial] = tp_price;
         self.pending_sl_price[trial] = sl_price;
+        self.entry_is_short[trial] = is_short;
         let jitter = self.rand_u64(self.jitter_ms + 1);
         self.entry_active_at[trial] = ts + self.latency_ms + jitter;
     }
@@ -172,8 +179,16 @@ impl BatchExchange {
             }
 
             // Step 2: Trade crosses active entry → fill immediately
-            if self.entry_active_at[i] == 0 && self.entry_price[i] > 0.0 && price <= self.entry_price[i] {
-                self.fill_entry(i, ts, sl_delay);
+            // Long limit entry fills when price drops to entry; short when price rises.
+            if self.entry_active_at[i] == 0 && self.entry_price[i] > 0.0 {
+                let fills = if self.entry_is_short[i] {
+                    price >= self.entry_price[i]
+                } else {
+                    price <= self.entry_price[i]
+                };
+                if fills {
+                    self.fill_entry(i, ts, sl_delay);
+                }
             }
 
             // Step 3: Check TP/SL for all position slots
@@ -181,12 +196,22 @@ impl BatchExchange {
             for j in 0..mp {
                 let slot = base + j;
                 if self.pos_active[slot] != 0 {
-                    if price >= self.pos_tp_price[slot] {
+                    let is_short = self.pos_is_short[slot];
+                    // Long TP: price rises to TP. Short TP: price drops to TP.
+                    let tp_hit = if is_short { price <= self.pos_tp_price[slot] } else { price >= self.pos_tp_price[slot] };
+                    // Long SL: price drops to SL. Short SL: price rises to SL.
+                    let sl_hit = if is_short { price >= self.pos_sl_price[slot] } else { price <= self.pos_sl_price[slot] };
+                    if tp_hit {
                         let tp = self.pos_tp_price[slot];
                         self.close_position_at(i, slot, tp, true, ts);
                         self.total_exits += 1;
-                    } else if price <= self.pos_sl_price[slot] && ts >= self.pos_sl_active_at[slot] {
-                        let exit = price * (1.0 - self.slippage_pct);
+                    } else if sl_hit && ts >= self.pos_sl_active_at[slot] {
+                        // Slippage: long exits below market, short exits above.
+                        let exit = if is_short {
+                            price * (1.0 + self.slippage_pct)
+                        } else {
+                            price * (1.0 - self.slippage_pct)
+                        };
                         self.close_position_at(i, slot, exit, false, ts);
                         self.total_exits += 1;
                     }
@@ -199,8 +224,10 @@ impl BatchExchange {
     fn fill_entry(&mut self, trial: usize, ts: u64, sl_delay: u64) {
         let entry = self.entry_price[trial];
         let qty = self.entry_qty(entry);
+        let is_short = self.entry_is_short[trial];
         let mp = self.max_positions;
         let base = trial * mp;
+        let mut placed = false;
         for j in 0..mp {
             let slot = base + j;
             if self.pos_active[slot] == 0 {
@@ -210,25 +237,30 @@ impl BatchExchange {
                 self.pos_tp_price[slot] = self.pending_tp_price[trial];
                 self.pos_sl_price[slot] = self.pending_sl_price[trial];
                 self.pos_sl_active_at[slot] = ts + sl_delay;
+                self.pos_is_short[slot] = is_short;
+                placed = true;
                 break;
             }
         }
-        self.active_count[trial] += 1;
         self.entry_active_at[trial] = 0;
         self.entry_price[trial] = 0.0;
-        self.total_entries += 1;
+        if placed {
+            self.active_count[trial] += 1;
+            self.total_entries += 1;
+        }
     }
 
     #[inline(always)]
     fn close_position_at(&mut self, trial: usize, slot: usize, exit_price: f64, is_tp: bool, timestamp_ms: u64) {
         let qty = self.pos_quantity[slot];
         let entry = self.pos_entry_price[slot];
+        let dir: f64 = if self.pos_is_short[slot] { -1.0 } else { 1.0 };
         let exit_fee_rate = if is_tp { self.maker_fee } else { self.taker_fee };
 
         let (net_pnl, margin) = match self.market_type {
             MarketType::Inverse => {
                 let cs = self.contract_size;
-                let pnl_coin = cs * qty * (1.0 / entry - 1.0 / exit_price);
+                let pnl_coin = dir * cs * qty * (1.0 / entry - 1.0 / exit_price);
                 let notional_entry = cs * qty / entry;
                 let notional_exit = cs * qty / exit_price;
                 let entry_fee = notional_entry * self.maker_fee;
@@ -239,7 +271,7 @@ impl BatchExchange {
                 (net_usd, margin_coin * exit_price)
             }
             _ => {
-                let gross_pnl = qty * (exit_price - entry);
+                let gross_pnl = dir * qty * (exit_price - entry);
                 let entry_fee = qty * entry * self.maker_fee;
                 let exit_fee = qty * exit_price * exit_fee_rate;
                 let net = gross_pnl - entry_fee - exit_fee;
@@ -378,11 +410,11 @@ impl BatchExchange {
         let per_trial_f64_metrics = 8; // total_pnl, sum_wins, sum_losses, sum_returns, sum_returns_sq, sum_neg_returns_sq, peak_equity, max_drawdown
         let per_trial_u64 = 3; // entry_active_at, first_trade_at, last_trade_at
         let per_trial_u32 = 2; // trade_count, winning_trades
-        let per_trial_u8 = 1; // active_count
+        let per_trial_u8 = 2; // active_count, entry_is_short
         // Per-slot vectors (n * max_positions elements each)
         let per_slot_f64 = 4; // pos_entry_price, pos_quantity, pos_tp_price, pos_sl_price
         let per_slot_u64 = 1; // pos_sl_active_at
-        let per_slot_u8 = 1; // pos_active
+        let per_slot_u8 = 2; // pos_active, pos_is_short
 
         n * (per_trial_f64 + per_trial_f64_metrics) * 8
             + n * per_trial_u64 * 8
@@ -398,6 +430,7 @@ impl BatchExchange {
         self.entry_price.fill(0.0);
         self.pending_tp_price.fill(0.0);
         self.pending_sl_price.fill(0.0);
+        self.entry_is_short.fill(false);
         self.entry_active_at.fill(0);
         self.pos_active.fill(0);
         self.pos_entry_price.fill(0.0);
@@ -405,6 +438,7 @@ impl BatchExchange {
         self.pos_tp_price.fill(0.0);
         self.pos_sl_price.fill(0.0);
         self.pos_sl_active_at.fill(0);
+        self.pos_is_short.fill(false);
         self.active_count.fill(0);
         self.balance.fill(self.initial_balance);
         self.trade_count.fill(0);
