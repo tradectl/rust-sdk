@@ -490,6 +490,9 @@ pub struct PromotionConfig {
     /// Max concurrent promoted variants per symbol. Default: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_promotions: Option<usize>,
+    /// Seconds without an entry fill before a burst variant is auto-demoted. 0/None = disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_demote_secs: Option<u64>,
 }
 
 fn default_promotion_mode() -> String { "off".to_string() }
@@ -916,6 +919,19 @@ mod tests {
         assert_eq!(pc.max_promotions_per_window, 1);
         assert!(pc.min_trades_for_promotion.is_none());
         assert!(pc.min_sharpe.is_none());
+        assert!(pc.idle_demote_secs.is_none());
+    }
+
+    #[test]
+    fn promotion_config_idle_demote() {
+        let json = r#"{"idleDemoteSecs": 30}"#;
+        let pc: PromotionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(pc.idle_demote_secs, Some(30));
+
+        // Round-trip
+        let serialized = serde_json::to_string(&pc).unwrap();
+        let pc2: PromotionConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(pc2.idle_demote_secs, Some(30));
     }
 
     #[test]
