@@ -494,6 +494,10 @@ pub struct PromotionConfig {
     /// Seconds without an entry fill before a burst variant is auto-demoted. 0/None = disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_demote_secs: Option<u64>,
+    /// Penalty duration (seconds) after idle demotion — variant excluded from re-promotion.
+    /// Defaults to loss_penalty_secs if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_penalty_secs: Option<u64>,
 }
 
 fn default_promotion_mode() -> String { "off".to_string() }
