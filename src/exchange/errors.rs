@@ -36,7 +36,7 @@ pub enum ApiErrorKind {
     /// -4005: Quantity exceeds max allowed.
     QuantityExceeded,
     /// -2027: Exceeded maximum allowable position at current leverage.
-    /// Per-pair limit, not account-wide — should not stop the strategy.
+    /// Persistent: stops the strategy after repeated failures to prevent API spam.
     MaxPositionExceeded,
     /// -4164: Order notional below exchange minimum.
     MinNotional,
@@ -132,7 +132,7 @@ impl ExchangeApiError {
     /// Covers margin errors and quantity-exceeded — both indicate the strategy's parameters
     /// are incompatible with the current account/exchange state.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::InsufficientMargin | ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional)
+        matches!(self.kind, ApiErrorKind::InsufficientMargin | ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
@@ -148,7 +148,6 @@ impl ExchangeApiError {
                 | ApiErrorKind::DuplicateOrderId
                 | ApiErrorKind::TooManyOrders
                 | ApiErrorKind::IpBanned
-                | ApiErrorKind::MaxPositionExceeded
         )
     }
 

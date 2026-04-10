@@ -19,11 +19,6 @@ pub struct BotConfig {
     pub monitor: Option<MonitorConfig>,
     pub paper: Option<PaperSettings>,
     pub strats: Vec<StratEntry>,
-    /// Automatically reduce leverage to the exchange's per-symbol maximum
-    /// during init. Prevents -2027 errors when the exchange lowers a symbol's
-    /// max leverage below the account's cached value. Default: true.
-    #[serde(default)]
-    pub auto_adjust_leverage: bool,
     /// MCP server configuration (tools-only, no LLM dependency).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
@@ -171,6 +166,11 @@ pub struct ApiConfig {
     /// Supported by Binance only. Default: false.
     #[serde(default)]
     pub ws: bool,
+    /// Automatically reduce leverage to the exchange's per-symbol maximum
+    /// during init. Prevents -2027 errors when the exchange lowers a symbol's
+    /// max leverage below the account's cached value. Default: false.
+    #[serde(default)]
+    pub auto_adjust_leverage: bool,
 }
 
 impl Default for ApiConfig {
@@ -183,6 +183,7 @@ impl Default for ApiConfig {
             private_key: None,
             passphrase: None,
             ws: false,
+            auto_adjust_leverage: false,
         }
     }
 }
