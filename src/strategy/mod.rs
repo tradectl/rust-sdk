@@ -1,7 +1,7 @@
 pub mod batch;
 pub mod batch_exchange;
 
-use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef};
+use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, OrderBookDepth};
 pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchDiagnostics, BatchFactory, compute_score};
 pub use batch_exchange::BatchExchange;
 
@@ -150,6 +150,9 @@ pub struct StrategyContext<'a> {
     /// `true` when the strategy has reached its `maxOrderCount` limit.
     /// Strategies should skip entry logic when this is set.
     pub max_orders_reached: bool,
+    /// L2 order book depth snapshot. `None` when depth data is not available
+    /// (backtest, no depth subscription, or before first depth update arrives).
+    pub depth: Option<&'a OrderBookDepth>,
 }
 
 // ---------------------------------------------------------------------------

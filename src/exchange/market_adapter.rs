@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use async_trait::async_trait;
 use crate::types::{
-    BookTicker, KlineData, MarketFees, MarketType, Order, OrderRequest,
+    BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest,
     PairInfo, ProfitResult, Ticker24hr, TradeData,
 };
 
@@ -10,6 +10,7 @@ pub type BookTickerCallback = Box<dyn Fn(&BookTicker) + Send + Sync>;
 pub type KlineCallback = Box<dyn Fn(&KlineData) + Send + Sync>;
 pub type TradeCallback = Box<dyn Fn(&TradeData) + Send + Sync>;
 pub type OrderUpdateCallback = Box<dyn Fn(&Order) + Send + Sync>;
+pub type DepthCallback = Box<dyn Fn(&OrderBookDepth) + Send + Sync>;
 
 pub type ExchangeError = Box<dyn std::error::Error + Send + Sync>;
 pub type ExchangeResult<T> = Result<T, ExchangeError>;
@@ -60,6 +61,14 @@ pub trait MarketAdapter: Send + Sync {
     fn off_kline(&self, symbol: &str, interval: &str, id: CallbackId);
     fn on_trade(&self, symbol: &str, cb: TradeCallback) -> CallbackId;
     fn off_trade(&self, symbol: &str, id: CallbackId);
+
+    // ── L2 Depth (Push — optional, default no-op) ───────────────
+    /// Subscribe to L2 order book depth updates. `levels` is the desired
+    /// depth (adapter picks closest supported: e.g. Binance 5/10/20).
+    fn on_depth(&self, _symbol: &str, _levels: usize, _cb: DepthCallback) -> CallbackId { 0 }
+    fn off_depth(&self, _symbol: &str, _id: CallbackId) {}
+    /// Get the latest cached depth snapshot. Returns None if not subscribed.
+    fn get_depth(&self, _symbol: &str) -> Option<OrderBookDepth> { None }
 
     // ── Order Operations ─────────────────────────────────────────
     async fn place_order(&self, request: &OrderRequest) -> ExchangeResult<Order>;
