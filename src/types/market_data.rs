@@ -41,3 +41,20 @@ pub struct Ticker24hr {
     pub volume: f64,
     pub quote_volume: f64,
 }
+
+/// A single price level in the order book (L2 depth).
+#[derive(Debug, Clone, Copy)]
+pub struct DepthLevel {
+    pub price: f64,
+    pub quantity: f64,
+}
+
+/// L2 order book depth snapshot.
+/// Bids sorted descending by price (best bid first),
+/// asks sorted ascending by price (best ask first).
+#[derive(Debug, Clone)]
+pub struct OrderBookDepth {
+    pub bids: Vec<DepthLevel>,
+    pub asks: Vec<DepthLevel>,
+    pub timestamp_ms: u64,
+}
