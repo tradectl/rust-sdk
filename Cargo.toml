@@ -1,6 +1,6 @@
 [package]
 name = "tradectl-sdk"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Crypto trading strategy SDK — types, traits, exchange abstractions"
 

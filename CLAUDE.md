@@ -1,6 +1,6 @@
 # tradectl-sdk
 
-Core SDK crate (v0.1.7) — types, traits, ABI, exchange abstractions, profit calculation, and monitor broadcasting. Every other Rust crate in the workspace depends on this.
+Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit calculation, and monitor broadcasting. Every other Rust crate in the workspace depends on this.
 
 ## Crate Structure
 
