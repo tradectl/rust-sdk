@@ -30,6 +30,26 @@ pub struct BotConfig {
     pub strategy_docs: HashMap<String, String>,
 }
 
+impl BotConfig {
+    /// Returns `true` if any symbol is traded by strategies with different
+    /// directions, requiring the exchange to be in hedge (dual-side) mode.
+    pub fn requires_hedge_mode(&self) -> bool {
+        let mut symbol_directions: HashMap<&str, Side> = HashMap::new();
+        for strat in &self.strats {
+            for pair in &strat.pairs {
+                if let Some(&existing) = symbol_directions.get(pair.as_str()) {
+                    if existing != strat.direction {
+                        return true;
+                    }
+                } else {
+                    symbol_directions.insert(pair, strat.direction);
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Paper trading emulation settings.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +191,11 @@ pub struct ApiConfig {
     /// max leverage below the account's cached value. Default: false.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
+    /// Force hedge mode (dual-side position) on the exchange. When enabled,
+    /// every order includes `positionSide=LONG/SHORT`. Also auto-detected
+    /// when strategies with opposite directions share a symbol.
+    #[serde(default)]
+    pub hedge_mode: bool,
 }
 
 impl Default for ApiConfig {
@@ -184,6 +209,7 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             auto_adjust_leverage: false,
+            hedge_mode: false,
         }
     }
 }
