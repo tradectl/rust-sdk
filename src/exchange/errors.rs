@@ -19,8 +19,8 @@ pub struct ExchangeApiError {
 pub enum ApiErrorKind {
     /// -2013/-2011: Order does not exist (already filled/canceled).
     OrderNotFound,
-    /// -2021: Stop price would trigger immediately.
-    SlTriggerPrice,
+    /// -2021: Conditional order (stop/TP/SL) would trigger immediately.
+    TriggerImmediate,
     /// -2022: ReduceOnly order rejected (position already closed).
     ReduceOnlyRejected,
     /// -4197: No need to modify order (same price).
@@ -144,7 +144,7 @@ impl ExchangeApiError {
             ApiErrorKind::OrderNotFound
                 | ApiErrorKind::SamePrice
                 | ApiErrorKind::ReduceOnlyRejected
-                | ApiErrorKind::SlTriggerPrice
+                | ApiErrorKind::TriggerImmediate
                 | ApiErrorKind::DuplicateOrderId
                 | ApiErrorKind::TooManyOrders
                 | ApiErrorKind::IpBanned
@@ -166,7 +166,7 @@ impl ExchangeApiError {
 fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
     match code {
         -2013 | -2011 => ApiErrorKind::OrderNotFound,
-        -2021 => ApiErrorKind::SlTriggerPrice,
+        -2021 => ApiErrorKind::TriggerImmediate,
         -2022 => ApiErrorKind::ReduceOnlyRejected,
         -4197 => ApiErrorKind::SamePrice,
         -2019 => ApiErrorKind::InsufficientMargin,

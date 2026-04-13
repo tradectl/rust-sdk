@@ -1,4 +1,4 @@
-use crate::types::enums::{OrderSide, OrderStatus, OrderType, TimeInForce};
+use crate::types::enums::{OrderSide, OrderStatus, OrderType, Side, TimeInForce};
 
 #[derive(Debug, Clone)]
 pub struct OrderRequest {
@@ -11,6 +11,9 @@ pub struct OrderRequest {
     pub time_in_force: Option<TimeInForce>,
     pub client_order_id: Option<String>,
     pub reduce_only: Option<bool>,
+    /// Hedge mode position side. `None` = one-way mode (omit param),
+    /// `Some(Long/Short)` = hedge mode (`positionSide=LONG/SHORT`).
+    pub position_side: Option<Side>,
 }
 
 #[derive(Debug, Clone)]

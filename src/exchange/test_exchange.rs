@@ -547,6 +547,7 @@ mod tests {
                 time_in_force: None,
                 client_order_id: None,
                 reduce_only: None,
+                position_side: None,
             })
             .await
             .unwrap();
@@ -571,6 +572,7 @@ mod tests {
                 time_in_force: None,
                 client_order_id: None,
                 reduce_only: None,
+                position_side: None,
             })
             .await
             .unwrap();
@@ -597,6 +599,7 @@ mod tests {
                 time_in_force: None,
                 client_order_id: None,
                 reduce_only: None,
+                position_side: None,
             })
             .await
             .unwrap();
@@ -625,6 +628,7 @@ mod tests {
                 time_in_force: None,
                 client_order_id: None,
                 reduce_only: None,
+                position_side: None,
             })
             .await
             .unwrap();
@@ -697,6 +701,7 @@ mod tests {
             time_in_force: None,
             client_order_id: None,
             reduce_only: None,
+            position_side: None,
         })
         .await
         .unwrap();
@@ -766,6 +771,7 @@ mod tests {
                 time_in_force: None,
                 client_order_id: None,
                 reduce_only: None,
+                position_side: None,
             })
             .await;
         assert!(result.is_err());
