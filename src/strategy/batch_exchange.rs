@@ -257,7 +257,7 @@ impl BatchExchange {
         let dir: f64 = if self.pos_is_short[slot] { -1.0 } else { 1.0 };
         let exit_fee_rate = if is_tp { self.maker_fee } else { self.taker_fee };
 
-        let (net_pnl, margin) = match self.market_type {
+        let net_pnl = match self.market_type {
             MarketType::Inverse => {
                 let cs = self.contract_size;
                 let pnl_coin = dir * cs * qty * (1.0 / entry - 1.0 / exit_price);
@@ -266,21 +266,17 @@ impl BatchExchange {
                 let entry_fee = notional_entry * self.maker_fee;
                 let exit_fee = notional_exit * exit_fee_rate;
                 let net_coin = pnl_coin - entry_fee - exit_fee;
-                let net_usd = net_coin * exit_price;
-                let margin_coin = notional_entry / self.leverage;
-                (net_usd, margin_coin * exit_price)
+                net_coin * exit_price
             }
             _ => {
                 let gross_pnl = dir * qty * (exit_price - entry);
                 let entry_fee = qty * entry * self.maker_fee;
                 let exit_fee = qty * exit_price * exit_fee_rate;
-                let net = gross_pnl - entry_fee - exit_fee;
-                let margin = qty * entry / self.leverage;
-                (net, margin)
+                gross_pnl - entry_fee - exit_fee
             }
         };
 
-        let ret = if margin > 0.0 { net_pnl / margin } else { 0.0 };
+        let ret = if entry > 0.0 { dir * (exit_price - entry) / entry } else { 0.0 };
 
         self.balance[trial] += net_pnl;
         self.pos_active[slot] = 0;
