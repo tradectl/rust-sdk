@@ -91,6 +91,17 @@ pub struct BatchResult {
 /// ```rust,ignore
 /// declare_batch_strategy!("bounce-back", BounceBack::new, BounceBackBatch::new);
 /// ```
+///
+/// TODO(depth-in-batch): `BatchStrategy` currently sees only tickers and
+/// trades — no `on_depth` hook, no `ctx.depth`. Batch runs power sweep/shadow,
+/// so depth-aware strategies (e.g. sling-shot, when its depth signal is
+/// enabled) are evaluated without the depth signal and will score differently
+/// from a generic `Strategy` backtest on the same `.bin`. Closing this gap
+/// needs (a) an `on_depth(&DepthEvent)` trait method (or SoA depth snapshot in
+/// `BatchExchange`) and (b) the batch driver in
+/// `backtest/crates/backtest/src/batch.rs` to dispatch `MarketEvent::Depth`.
+/// Tracked alongside the TCTL v3 format rollout (see memory
+/// project_tctl_v3_format.md).
 pub trait BatchStrategy: Send {
     /// Access the underlying exchange engine.
     fn exchange(&self) -> &BatchExchange;

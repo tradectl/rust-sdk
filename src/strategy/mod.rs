@@ -312,7 +312,7 @@ pub struct StrategyPlugin {
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 3;
+pub const STRATEGY_ABI_VERSION: u32 = 4;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
