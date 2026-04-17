@@ -1,7 +1,7 @@
 pub mod batch;
 pub mod batch_exchange;
 
-use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, OrderBookDepth};
+use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, OrderBookDepth, VolumeProfile};
 pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchDiagnostics, BatchFactory, compute_score};
 pub use batch_exchange::BatchExchange;
 
@@ -153,6 +153,9 @@ pub struct StrategyContext<'a> {
     /// L2 order book depth snapshot. `None` when depth data is not available
     /// (backtest, no depth subscription, or before first depth update arrives).
     pub depth: Option<&'a OrderBookDepth>,
+    /// Per-symbol volume profile: relative volume ratio vs baseline, buy/sell ratio.
+    /// `None` when volume tracking is not available (before warmup or if disabled).
+    pub volume: Option<&'a VolumeProfile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +312,7 @@ pub struct StrategyPlugin {
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 3;
+pub const STRATEGY_ABI_VERSION: u32 = 4;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}

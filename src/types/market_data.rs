@@ -43,11 +43,19 @@ pub struct Ticker24hr {
 }
 
 /// A single price level in the order book (L2 depth).
-#[derive(Debug, Clone, Copy)]
+///
+/// `#[repr(C)]` with `f64 + f64` layout so it is bit-compatible with the
+/// fixed-size arrays stored in `DepthEvent` (the on-disk prepared format).
+/// This lets the backtest runner refresh a `Vec<DepthLevel>` from a
+/// `&[DepthLevel]` memcpy with no conversion cost.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C, align(8))]
 pub struct DepthLevel {
     pub price: f64,
     pub quantity: f64,
 }
+
+const _: () = assert!(std::mem::size_of::<DepthLevel>() == 16);
 
 /// L2 order book depth snapshot.
 /// Bids sorted descending by price (best bid first),
