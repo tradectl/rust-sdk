@@ -24,11 +24,6 @@ pub trait SessionStoreApi: Send + Sync {
     fn all(&self) -> HashMap<String, serde_json::Value>;
 }
 
-/// Trigger engine API — trait object for trigger state reads.
-pub trait TriggerEngineApi: Send + Sync {
-    fn snapshot(&self) -> serde_json::Value;
-}
-
 /// Strategy control API — pause/resume entries per symbol.
 pub trait StrategyControlApi: Send + Sync {
     fn pause(&self, symbol: &str) -> bool;
