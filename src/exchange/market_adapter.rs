@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use crate::types::{
     BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest,
-    PairInfo, ProfitResult, Ticker24hr, TradeData,
+    OrderSide, PairInfo, ProfitResult, Ticker24hr, TradeData,
 };
 
 pub type CallbackId = u64;
@@ -77,6 +77,7 @@ pub trait MarketAdapter: Send + Sync {
         &self,
         symbol: &str,
         order_id: &str,
+        side: OrderSide,
         price: f64,
         quantity: Option<f64>,
     ) -> ExchangeResult<Order>;
