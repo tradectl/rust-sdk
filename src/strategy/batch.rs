@@ -99,7 +99,7 @@ pub struct BatchResult {
 /// from a generic `Strategy` backtest on the same `.bin`. Closing this gap
 /// needs (a) an `on_depth(&DepthEvent)` trait method (or SoA depth snapshot in
 /// `BatchExchange`) and (b) the batch driver in
-/// `backtest/crates/backtest/src/batch.rs` to dispatch `MarketEvent::Depth`.
+/// `backtest/src/batch.rs` to dispatch `MarketEvent::Depth`.
 /// Tracked alongside the TCTL v3 format rollout (see memory
 /// project_tctl_v3_format.md).
 pub trait BatchStrategy: Send {
