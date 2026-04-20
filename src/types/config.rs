@@ -251,6 +251,10 @@ pub struct StratEntry {
     /// Trading direction: `LONG` or `SHORT`. Defaults to `LONG`.
     #[serde(default)]
     pub direction: Side,
+    /// Skip this strategy entirely on run. Useful for keeping tuned variants
+    /// in the config file without executing them. Defaults to `false`.
+    #[serde(default)]
+    pub disable: bool,
     /// Paper-trading mode. Defaults to `false`.
     #[serde(default)]
     pub is_emulator: bool,
@@ -672,6 +676,31 @@ mod tests {
         assert_eq!(entry.get_f64("SL"), Some(0.5));
         assert_eq!(entry.get_f64_or("stopLoss", 0.0), -0.5);
         assert_eq!(entry.get_bool("enablePriceReducer"), Some(true));
+    }
+
+    #[test]
+    fn disable_defaults_to_false() {
+        let json = r#"{
+            "name": "test",
+            "type": "Demo",
+            "marketType": "LINEAR",
+            "pairs": ["BTCUSDT"]
+        }"#;
+        let entry: StratEntry = serde_json::from_str(json).unwrap();
+        assert!(!entry.disable);
+    }
+
+    #[test]
+    fn parse_disable_true() {
+        let json = r#"{
+            "name": "test",
+            "type": "Demo",
+            "marketType": "LINEAR",
+            "disable": true,
+            "pairs": ["BTCUSDT"]
+        }"#;
+        let entry: StratEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.disable);
     }
 
     #[test]
