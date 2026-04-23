@@ -223,7 +223,11 @@ pub struct LimitsConfig {
     pub max_loss_limit: f64,
 }
 
-/// Database path.
+/// Deprecated. The trade database lives at a fixed path
+/// (`~/.tradectl/trades.db`) and this field is ignored at runtime.
+/// Retained as a struct so existing configs parse without error.
+///
+/// Will be removed in a future release once the migration window closes.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DbConfig {
     pub path: String,
