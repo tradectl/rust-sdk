@@ -156,6 +156,18 @@ pub struct StrategyContext<'a> {
     /// Per-symbol volume profile: relative volume ratio vs baseline, buy/sell ratio.
     /// `None` when volume tracking is not available (before warmup or if disabled).
     pub volume: Option<&'a VolumeProfile>,
+    /// `true` iff the runner will accept a fresh `Action::PlaceEntry` for a NEW
+    /// entry slot right now. `false` when any gate suppresses new entries:
+    /// trigger-bus not armed / blacklisted, penalty cooldown, session blocked,
+    /// slot cap reached, shadow-only, or paused-by-edge-decay.
+    ///
+    /// Chase edits of already-placed entries are always allowed regardless of
+    /// this flag — the runner distinguishes edits from new entries by entry_id.
+    ///
+    /// Strategies must check this before emitting a new `PlaceEntry`. Emitting
+    /// one when `can_enter == false` is a strategy bug; the runner drops the
+    /// action and logs a warning.
+    pub can_enter: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +324,7 @@ pub struct StrategyPlugin {
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 4;
+pub const STRATEGY_ABI_VERSION: u32 = 5;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
