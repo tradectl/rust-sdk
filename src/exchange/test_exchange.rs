@@ -391,6 +391,7 @@ impl MarketAdapter for TestExchange {
         &self,
         symbol: &str,
         order_id: &str,
+        _side: OrderSide,
         price: f64,
         quantity: Option<f64>,
     ) -> ExchangeResult<Order> {

@@ -2,7 +2,7 @@
 //! and prepared-binary (`.bin`) format.
 //!
 //! Every struct here is `#[repr(C)]` with a compile-time size assertion so the
-//! on-disk segmented format in `backtest/crates/backtest` can mmap arrays of
+//! on-disk segmented format in `backtest` can mmap arrays of
 //! them as zero-copy `&[T]`. Adding or reordering fields is a breaking change.
 
 use std::mem::size_of;

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 /// Strategies use this for adaptive threshold detection (e.g., trigger
 /// when volume is 3x normal instead of a fixed USDT amount).
 ///
-/// Architecture matches upstream's Worker.c → CoinToStrategyTransfer pattern:
+/// Architecture — per-coin cumulative state feeds a strategy-level gate:
 /// the runner computes this per-symbol and passes it via StrategyContext.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VolumeProfile {

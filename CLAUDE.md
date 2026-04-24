@@ -321,7 +321,7 @@ pub struct BotConfig {
 Shared state for MCP/AI access to live runner data. RwLock-based for concurrent reads.
 
 - **Snapshots**: PositionSnapshot, FillSnapshot, TickerSnapshot, BotMeta, OrdersSnapshot, ShadowSummarySnapshot
-- **Trait APIs**: PromotionStoreApi, SessionStoreApi, TriggerEngineApi, StrategyControlApi
+- **Trait APIs**: PromotionStoreApi, SessionStoreApi, StrategyControlApi
 - **Computed insights**: get_performance_summary, get_risk_assessment, get_symbol_comparison
 
 ## Build & Test
