@@ -96,6 +96,22 @@ pub trait MarketAdapter: Send + Sync {
     fn get_fees(&self) -> MarketFees;
     fn get_leverage(&self, symbol: &str) -> f64;
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> ExchangeResult<()>;
+    /// Maximum leverage allowed for the given symbol on this exchange/
+    /// account. Default: `1` for Spot, `125` for futures — adapters
+    /// should override to query the exchange's per-symbol brackets so
+    /// the UI's leverage slider clamps correctly (BTCUSDT might allow
+    /// 125, an alt might cap at 20). Errors degrade gracefully to the
+    /// default at the call site.
+    async fn get_max_leverage(&self, _symbol: &str) -> ExchangeResult<u32> {
+        Ok(if self.market_type() == MarketType::Spot { 1 } else { 125 })
+    }
+    /// Switch between cross and isolated margin for a futures symbol.
+    /// Default is a no-op (returns Ok) so adapters that don't support it
+    /// — spot, paper, replay, exchanges without an exposed endpoint —
+    /// don't need a stub. Manual-trading server treats Ok as "applied".
+    async fn set_margin_mode(&self, _symbol: &str, _isolated: bool) -> ExchangeResult<()> {
+        Ok(())
+    }
     async fn get_balance(&self) -> ExchangeResult<f64>;
 
     // ── Profit ───────────────────────────────────────────────────
