@@ -32,6 +32,18 @@ pub enum MarketType {
     Inverse,
 }
 
+impl MarketType {
+    /// Stable lowercase string used for SQL serialization (e.g. `trades.db.market_type`).
+    /// Do not change — bound by on-disk schema in `~/.tradectl/trades.db`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spot => "spot",
+            Self::Linear => "linear",
+            Self::Inverse => "inverse",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeInForce {
     Gtc,
