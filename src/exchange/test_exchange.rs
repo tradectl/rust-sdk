@@ -184,6 +184,19 @@ impl TestExchange {
         *self.balance.write().unwrap() = amount;
     }
 
+    /// Test-only: insert an `Order` into the in-memory book directly,
+    /// bypassing `place_order`. Used to model exchange-side states
+    /// the controller needs to observe via `fetch_order` (e.g. a
+    /// FILLED order that's no longer reported by
+    /// `fetch_open_orders` — which our reconcile path needs to
+    /// disambiguate from a Cancel). `fetch_open_orders` filters by
+    /// status, so a Filled order injected here will be visible to
+    /// `fetch_order` but excluded from the open list — exactly the
+    /// shape Binance returns post-fill.
+    pub fn inject_order(&self, order: Order) {
+        self.open_orders.write().unwrap().insert(order.order_id.clone(), order);
+    }
+
     /// Add or update a pair.
     pub fn set_pair(&self, pair: PairInfo) {
         self.pairs.write().unwrap().insert(pair.symbol.clone(), pair);
@@ -418,11 +431,22 @@ impl MarketAdapter for TestExchange {
     }
 
     async fn fetch_open_orders(&self, symbol: &str) -> ExchangeResult<Vec<Order>> {
+        // Match real exchanges: only return orders that are actually
+        // OPEN (New / PartiallyFilled). This lets tests model the
+        // post-fill scenario Binance presents — `fetch_open_orders`
+        // strips Filled/Canceled entries but `fetch_order` still
+        // resolves them by id.
         Ok(self
             .open_orders
             .read().unwrap()
             .values()
-            .filter(|o| o.symbol == symbol)
+            .filter(|o| {
+                o.symbol == symbol
+                    && matches!(
+                        o.status,
+                        OrderStatus::New | OrderStatus::PartiallyFilled
+                    )
+            })
             .cloned()
             .collect())
     }
