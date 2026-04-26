@@ -11,6 +11,10 @@ use super::enums::Side;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
+    /// Operator-supplied name for this bot run. Used as the cell-identity key
+    /// in the analytics tab. Falls back to the config-file basename when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
     pub api: ApiConfig,
     pub limits: Option<LimitsConfig>,
@@ -1105,5 +1109,31 @@ mod tests {
         assert_eq!(ed.score_threshold, -1.0);
         assert_eq!(ed.consecutive_windows, 4);
         assert_eq!(ed.action, "notify");
+    }
+}
+
+#[cfg(test)]
+mod bot_config_name_tests {
+    use super::*;
+
+    #[test]
+    fn bot_config_name_defaults_to_none_when_absent() {
+        let json = r#"{
+            "api": { "provider": "Binance", "key": "k", "secret": "s" },
+            "strats": []
+        }"#;
+        let cfg: BotConfig = serde_json::from_str(json).expect("parse");
+        assert!(cfg.name.is_none());
+    }
+
+    #[test]
+    fn bot_config_name_round_trips() {
+        let json = r#"{
+            "name": "bncm03L",
+            "api": { "provider": "Binance", "key": "k", "secret": "s" },
+            "strats": []
+        }"#;
+        let cfg: BotConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(cfg.name.as_deref(), Some("bncm03L"));
     }
 }
