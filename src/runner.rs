@@ -5,67 +5,152 @@ use crate::types::Side;
 
 // ── Logging setup ───────────────────────────────────────────────────
 
-/// Initialize structured logging from config.
+use once_cell::sync::OnceCell;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::Layer;
+use tracing_subscriber::Registry;
+
+/// Held for the lifetime of the process so the non-blocking writer's
+/// background thread keeps draining log records until shutdown.
+static LOG_GUARDS: OnceCell<Mutex<Vec<WorkerGuard>>> = OnceCell::new();
+static JANITOR: OnceCell<crate::logging::LogJanitor> = OnceCell::new();
+static LOG_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Initialise structured logging.
 ///
-/// Supports three modes: `"console"` (stderr only), `"file"` (file only),
-/// `"console_file"` (both). Pass `None` for console-only at info level.
-pub fn setup_logging(config: &Option<crate::types::config::LogConfig>) {
-    use simplelog::*;
-    use time::macros::format_description;
-
-    let (level, mode, path, no_timestamp) = match config {
-        Some(cfg) => {
-            let level = match cfg.level.to_lowercase().as_str() {
-                "trace" => LevelFilter::Trace,
-                "debug" => LevelFilter::Debug,
-                "info" => LevelFilter::Info,
-                "warn" => LevelFilter::Warn,
-                "error" => LevelFilter::Error,
-                _ => LevelFilter::Info,
-            };
-            (level, cfg.mode.as_str(), Some(&cfg.path), cfg.no_timestamp)
-        }
-        None => (LevelFilter::Info, "console", None, false),
-    };
-
-    let mut builder = ConfigBuilder::new();
-    if no_timestamp {
-        builder.set_time_level(LevelFilter::Off);
-    } else {
-        builder.set_time_format_custom(format_description!(
-            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
-        ));
-    }
-    let log_config = builder.build();
-
-    let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
-
-    if mode != "file" {
-        loggers.push(TermLogger::new(
-            level, log_config.clone(), TerminalMode::Stderr, ColorChoice::Auto,
-        ));
-    }
-
-    if mode != "console" {
-        if let Some(dir) = path {
-            let _ = std::fs::create_dir_all(dir);
-            let filename = format!("{}/bot-{}.log",
-                dir, chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            if let Ok(file) = std::fs::File::create(&filename) {
-                loggers.push(WriteLogger::new(level, log_config, file));
-                log::info!("logging to {}", filename);
-            }
-        }
-    }
-
-    if !loggers.is_empty() {
-        let _ = CombinedLogger::init(loggers);
-    }
+/// `name` is the per-bot identifier used in the log path:
+/// files land at `<base>/<name>/<name>_YYYY-MM-DD.log`.
+/// Pass the config-file stem (e.g. `bn-session-config`) so daemon and
+/// foreground runs share the same file.
+pub fn setup_logging(name: &str, config: &Option<crate::types::config::LogConfig>) {
+    LOG_INIT.call_once(|| init_inner(name, config));
 }
 
-/// Shorthand: console-only logging at info level.
+fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
+    let (level, base_path, retention_days, no_timestamp) = match config {
+        Some(cfg) => (
+            cfg.level.as_str(),
+            cfg.path.clone(),
+            cfg.retention_days,
+            cfg.no_timestamp,
+        ),
+        None => ("info", None, 30, false),
+    };
+
+    // EnvFilter: RUST_LOG overrides config when set.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(level));
+
+    let stderr_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .without_time()
+            .boxed()
+    } else {
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .boxed()
+    };
+
+    let mut guards: Vec<WorkerGuard> = Vec::new();
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![stderr_layer];
+
+    if retention_days > 0 {
+        let dir = resolve_log_dir(base_path.as_deref(), name);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("setup_logging: failed to create {}: {e}", dir.display());
+        }
+
+        let prefix = format!("{name}_");
+        let appender = tracing_appender::rolling::daily(&dir, &prefix);
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+        guards.push(guard);
+
+        let file_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking)
+                .without_time()
+                .boxed()
+        } else {
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking)
+                .boxed()
+        };
+        layers.push(file_layer);
+
+        // Background gzip + retention sweep.
+        let janitor = crate::logging::LogJanitor::spawn(
+            dir,
+            name.to_string(),
+            retention_days,
+        );
+        let _ = JANITOR.set(janitor);
+    }
+
+    tracing_subscriber::registry()
+        .with(layers)
+        .with(env_filter)
+        .init();
+
+    let _ = LOG_GUARDS.set(Mutex::new(guards));
+
+    // Bridge `log` facade calls into tracing so existing log::info!() calls
+    // route through the same subscribers.
+    let _ = tracing_log::LogTracer::init();
+}
+
+fn resolve_log_dir(base: Option<&str>, name: &str) -> PathBuf {
+    let base_path = match base {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => default_log_root(),
+    };
+    base_path.join(name)
+}
+
+fn default_log_root() -> PathBuf {
+    dirs::home_dir()
+        .or_else(|| std::env::var("TRADECTL_HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tradectl")
+        .join("logs")
+}
+
+/// Shorthand: console-only logging at info level under the name "tradectl".
 pub fn init_logging() {
-    setup_logging(&None);
+    setup_logging("tradectl", &None);
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_log_dir_uses_default_when_path_empty() {
+        let p = resolve_log_dir(Some(""), "mybot");
+        assert!(p.ends_with("logs/mybot"), "got {}", p.display());
+    }
+
+    #[test]
+    fn resolve_log_dir_uses_default_when_path_none() {
+        let p = resolve_log_dir(None, "mybot");
+        assert!(p.ends_with("logs/mybot"), "got {}", p.display());
+    }
+
+    #[test]
+    fn resolve_log_dir_honours_custom_base() {
+        let p = resolve_log_dir(Some("/var/log/tradectl/x"), "mybot");
+        assert_eq!(p, std::path::PathBuf::from("/var/log/tradectl/x/mybot"));
+    }
 }
 
 // ── Order ID ────────────────────────────────────────────────────────
