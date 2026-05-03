@@ -118,8 +118,8 @@ fn resolve_log_dir(base: Option<&str>, name: &str) -> PathBuf {
 }
 
 fn default_log_root() -> PathBuf {
-    dirs::home_dir()
-        .or_else(|| std::env::var("TRADECTL_HOME").ok().map(PathBuf::from))
+    std::env::var("TRADECTL_HOME").ok().map(PathBuf::from)
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tradectl")
         .join("logs")
@@ -150,6 +150,23 @@ mod logging_tests {
     fn resolve_log_dir_honours_custom_base() {
         let p = resolve_log_dir(Some("/var/log/tradectl/x"), "mybot");
         assert_eq!(p, std::path::PathBuf::from("/var/log/tradectl/x/mybot"));
+    }
+
+    #[test]
+    fn default_log_root_prefers_tradectl_home_env() {
+        // Save and restore HOME / TRADECTL_HOME to avoid polluting other tests.
+        let prev_home = std::env::var("HOME").ok();
+        let prev_th = std::env::var("TRADECTL_HOME").ok();
+
+        std::env::set_var("HOME", "/should-be-ignored");
+        std::env::set_var("TRADECTL_HOME", "/tmp/tradectl-home-test");
+
+        let root = default_log_root();
+        assert_eq!(root, std::path::PathBuf::from("/tmp/tradectl-home-test/.tradectl/logs"));
+
+        // restore
+        match prev_home { Some(v) => std::env::set_var("HOME", v), None => std::env::remove_var("HOME") }
+        match prev_th { Some(v) => std::env::set_var("TRADECTL_HOME", v), None => std::env::remove_var("TRADECTL_HOME") }
     }
 }
 
