@@ -4,7 +4,9 @@
 //!   1. Gzip files whose date is before today.
 //!   2. Delete files (compressed or not) older than `retention_days`.
 //!
-//! Filenames are expected as `<prefix>_YYYY-MM-DD.log` (or `.log.gz`).
+//! Filenames are expected as `<prefix>.YYYY-MM-DD.log` (or `.log.gz`),
+//! matching the output of `tracing_appender::rolling` configured with
+//! `filename_prefix(prefix)` + `filename_suffix("log")`.
 //! The date in the filename is authoritative — file mtime is ignored
 //! so that NTP clock skew can't cause spurious deletes.
 
@@ -93,10 +95,10 @@ struct ParsedName {
     compressed: bool,
 }
 
-/// Parse `<prefix>_YYYY-MM-DD.log` or `<prefix>_YYYY-MM-DD.log.gz`.
+/// Parse `<prefix>.YYYY-MM-DD.log` or `<prefix>.YYYY-MM-DD.log.gz`.
 /// Returns None for any other filename.
 fn parse_log_filename(name: &str, prefix: &str) -> Option<ParsedName> {
-    let expected_prefix = format!("{prefix}_");
+    let expected_prefix = format!("{prefix}.");
     let rest = name.strip_prefix(&expected_prefix)?;
 
     let (date_part, compressed) = if let Some(d) = rest.strip_suffix(".log.gz") {
@@ -156,14 +158,14 @@ mod tests {
 
     #[test]
     fn parse_filename_log() {
-        let p = parse_log_filename("mybot_2026-05-04.log", "mybot").unwrap();
+        let p = parse_log_filename("mybot.2026-05-04.log", "mybot").unwrap();
         assert_eq!(p.date, NaiveDate::from_ymd_opt(2026, 5, 4).unwrap());
         assert!(!p.compressed);
     }
 
     #[test]
     fn parse_filename_log_gz() {
-        let p = parse_log_filename("mybot_2026-05-04.log.gz", "mybot").unwrap();
+        let p = parse_log_filename("mybot.2026-05-04.log.gz", "mybot").unwrap();
         assert_eq!(p.date, NaiveDate::from_ymd_opt(2026, 5, 4).unwrap());
         assert!(p.compressed);
     }
@@ -175,12 +177,57 @@ mod tests {
 
     #[test]
     fn parse_filename_malformed_date_skipped() {
-        assert!(parse_log_filename("mybot_not-a-date.log", "mybot").is_none());
+        assert!(parse_log_filename("mybot.not-a-date.log", "mybot").is_none());
     }
 
     #[test]
     fn parse_filename_unrelated_extension_skipped() {
-        assert!(parse_log_filename("mybot_2026-05-04.txt", "mybot").is_none());
+        assert!(parse_log_filename("mybot.2026-05-04.txt", "mybot").is_none());
+    }
+
+    #[test]
+    fn parse_filename_underscore_separator_skipped() {
+        // Belt-and-braces: the legacy `<prefix>_<date>.log` shape (which
+        // tracing-appender does NOT produce) must not match the new parser.
+        assert!(parse_log_filename("mybot_2026-05-04.log", "mybot").is_none());
+    }
+
+    #[test]
+    fn parse_filename_matches_appender_output() {
+        // Lock down the contract between rust-sdk::runner::setup_logging
+        // (which configures filename_prefix=name + filename_suffix="log")
+        // and this parser. If the appender's filename layout ever changes,
+        // this fails fast.
+        let dir = std::env::temp_dir().join(format!(
+            "janitor-appender-contract-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("mybot")
+            .filename_suffix("log")
+            .build(&dir)
+            .unwrap();
+        let (mut nb, guard) = tracing_appender::non_blocking(appender);
+        use std::io::Write;
+        writeln!(nb, "probe").unwrap();
+        drop(nb);
+        drop(guard);
+
+        let mut matched = false;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if parse_log_filename(&name, "mybot").is_some() {
+                matched = true;
+                break;
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(matched, "no janitor-parseable file produced by the appender");
     }
 
     #[test]
@@ -188,8 +235,8 @@ mod tests {
         let dir = tmpdir();
         let today = Utc::now().date_naive();
         let yesterday = today - chrono::Duration::days(1);
-        let yname = format!("mybot_{}.log", yesterday.format("%Y-%m-%d"));
-        let tname = format!("mybot_{}.log", today.format("%Y-%m-%d"));
+        let yname = format!("mybot.{}.log", yesterday.format("%Y-%m-%d"));
+        let tname = format!("mybot.{}.log", today.format("%Y-%m-%d"));
         touch(dir.path(), &yname, "yesterday data\n");
         touch(dir.path(), &tname, "today data\n");
 
@@ -214,23 +261,23 @@ mod tests {
         let today = Utc::now().date_naive();
         let old = today - chrono::Duration::days(40);
         let recent = today - chrono::Duration::days(5);
-        touch(dir.path(), &format!("mybot_{}.log.gz", old.format("%Y-%m-%d")), "x");
-        touch(dir.path(), &format!("mybot_{}.log.gz", recent.format("%Y-%m-%d")), "x");
+        touch(dir.path(), &format!("mybot.{}.log.gz", old.format("%Y-%m-%d")), "x");
+        touch(dir.path(), &format!("mybot.{}.log.gz", recent.format("%Y-%m-%d")), "x");
 
         sweep_once(dir.path(), "mybot", 30).unwrap();
 
-        assert!(!dir.path().join(format!("mybot_{}.log.gz", old.format("%Y-%m-%d"))).exists());
-        assert!(dir.path().join(format!("mybot_{}.log.gz", recent.format("%Y-%m-%d"))).exists());
+        assert!(!dir.path().join(format!("mybot.{}.log.gz", old.format("%Y-%m-%d"))).exists());
+        assert!(dir.path().join(format!("mybot.{}.log.gz", recent.format("%Y-%m-%d"))).exists());
     }
 
     #[test]
     fn sweep_ignores_unrelated_files() {
         let dir = tmpdir();
         touch(dir.path(), "README.md", "hi");
-        touch(dir.path(), "other_2026-05-04.log", "not ours");
+        touch(dir.path(), "other.2026-05-04.log", "not ours");
         sweep_once(dir.path(), "mybot", 30).unwrap();
         assert!(dir.path().join("README.md").exists());
-        assert!(dir.path().join("other_2026-05-04.log").exists());
+        assert!(dir.path().join("other.2026-05-04.log").exists());
     }
 
     #[test]

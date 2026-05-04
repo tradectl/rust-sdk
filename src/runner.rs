@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
@@ -25,14 +26,17 @@ static LOG_INIT: std::sync::Once = std::sync::Once::new();
 /// Initialise structured logging.
 ///
 /// `name` is the per-bot identifier used in the log path:
-/// files land at `<base>/<name>/<name>_YYYY-MM-DD.log`.
+/// files land at `<base>/<sanitized>/<sanitized>.YYYY-MM-DD.log`.
 /// Pass the config-file stem (e.g. `bn-session-config`) so daemon and
-/// foreground runs share the same file.
+/// foreground runs share the same file. The name is sanitized before use
+/// as a path component — see [`sanitize_bot_name`].
 pub fn setup_logging(name: &str, config: &Option<crate::types::config::LogConfig>) {
     LOG_INIT.call_once(|| init_inner(name, config));
 }
 
 fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
+    let safe_name = sanitize_bot_name(name);
+
     let (level, base_path, retention_days, no_timestamp) = match config {
         Some(cfg) => (
             cfg.level.as_str(),
@@ -64,37 +68,53 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![stderr_layer];
 
     if retention_days > 0 {
-        let dir = resolve_log_dir(base_path.as_deref(), name);
+        let dir = resolve_log_dir(base_path.as_deref(), &safe_name);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("setup_logging: failed to create {}: {e}", dir.display());
         }
 
-        let prefix = format!("{name}_");
-        let appender = tracing_appender::rolling::daily(&dir, &prefix);
-        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        guards.push(guard);
+        // `<dir>/<safe_name>.YYYY-MM-DD.log` — explicit suffix so the janitor
+        // and `tradectl logs` parsers can locate the files unambiguously.
+        let appender_result = RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix(&safe_name)
+            .filename_suffix("log")
+            .build(&dir);
 
-        let file_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(non_blocking)
-                .without_time()
-                .boxed()
-        } else {
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(non_blocking)
-                .boxed()
-        };
-        layers.push(file_layer);
+        match appender_result {
+            Ok(appender) => {
+                let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+                guards.push(guard);
 
-        // Background gzip + retention sweep.
-        let janitor = crate::logging::LogJanitor::spawn(
-            dir,
-            name.to_string(),
-            retention_days,
-        );
-        let _ = JANITOR.set(janitor);
+                let file_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
+                    fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(non_blocking)
+                        .without_time()
+                        .boxed()
+                } else {
+                    fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(non_blocking)
+                        .boxed()
+                };
+                layers.push(file_layer);
+
+                // Background gzip + retention sweep.
+                let janitor = crate::logging::LogJanitor::spawn(
+                    dir,
+                    safe_name.clone(),
+                    retention_days,
+                );
+                let _ = JANITOR.set(janitor);
+            }
+            Err(e) => {
+                eprintln!(
+                    "setup_logging: failed to build rolling appender in {}: {e}",
+                    dir.display()
+                );
+            }
+        }
     }
 
     tracing_subscriber::registry()
@@ -107,14 +127,52 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
     // Bridge `log` facade calls into tracing so existing log::info!() calls
     // route through the same subscribers.
     let _ = tracing_log::LogTracer::init();
+
+    install_panic_hook();
 }
 
-fn resolve_log_dir(base: Option<&str>, name: &str) -> PathBuf {
+/// Replace any character that could escape the log directory or produce a
+/// confusing filename with an underscore. Keeps the result non-empty.
+///
+/// Path separators (`/`, `\`) and the parent reference (`..`) become `_`,
+/// as do control characters and whitespace. An empty or all-rejected
+/// input falls back to `"bot"`.
+pub fn sanitize_bot_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "bot".to_string();
+    }
+
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        let ok = !ch.is_control()
+            && !ch.is_whitespace()
+            && !matches!(ch, '/' | '\\' | ':' | '\0');
+        out.push(if ok { ch } else { '_' });
+    }
+
+    // Collapse `..` runs that survived as literal dots, then collapse
+    // resulting `_` runs to a single `_` so a name like `../evil` ends up
+    // `_evil` rather than `__evil`.
+    while out.contains("..") {
+        out = out.replace("..", "_");
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+
+    if out.is_empty() || out == "_" {
+        return "bot".to_string();
+    }
+    out
+}
+
+fn resolve_log_dir(base: Option<&str>, sanitized_name: &str) -> PathBuf {
     let base_path = match base {
         Some(p) if !p.is_empty() => PathBuf::from(p),
         _ => default_log_root(),
     };
-    base_path.join(name)
+    base_path.join(sanitized_name)
 }
 
 fn default_log_root() -> PathBuf {
@@ -123,6 +181,33 @@ fn default_log_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tradectl")
         .join("logs")
+}
+
+/// Route panics through `tracing::error!` so they survive daemon mode
+/// (where stdout/stderr are wired to /dev/null) and end up in the rotating
+/// log file alongside the rest of the bot output.
+fn install_panic_hook() {
+    static HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+    HOOK_INSTALLED.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            tracing::error!(target: "panic", "panic at {location}: {payload}");
+            // Still call the default hook so terminal/foreground users see
+            // the standard backtrace; in daemon mode it goes to /dev/null.
+            default(info);
+        }));
+    });
 }
 
 /// Shorthand: console-only logging at info level under the name "tradectl".
@@ -168,6 +253,36 @@ mod logging_tests {
         match prev_home { Some(v) => std::env::set_var("HOME", v), None => std::env::remove_var("HOME") }
         match prev_th { Some(v) => std::env::set_var("TRADECTL_HOME", v), None => std::env::remove_var("TRADECTL_HOME") }
     }
+
+    #[test]
+    fn sanitize_passes_normal_names() {
+        assert_eq!(sanitize_bot_name("bncm03L"), "bncm03L");
+        assert_eq!(sanitize_bot_name("bn-session-config"), "bn-session-config");
+        assert_eq!(sanitize_bot_name("bot.with.dots"), "bot.with.dots");
+    }
+
+    #[test]
+    fn sanitize_rejects_path_separators() {
+        assert_eq!(sanitize_bot_name("../evil"), "_evil");
+        assert_eq!(sanitize_bot_name("a/b"), "a_b");
+        assert_eq!(sanitize_bot_name("a\\b"), "a_b");
+        assert_eq!(sanitize_bot_name(".."), "bot");
+        assert_eq!(sanitize_bot_name("."), "bot");
+    }
+
+    #[test]
+    fn sanitize_rejects_whitespace_and_control() {
+        assert_eq!(sanitize_bot_name("my bot"), "my_bot");
+        assert_eq!(sanitize_bot_name("a\tb"), "a_b");
+        assert_eq!(sanitize_bot_name("a\nb"), "a_b");
+        assert_eq!(sanitize_bot_name("a\0b"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_falls_back_to_bot_for_empty() {
+        assert_eq!(sanitize_bot_name(""), "bot");
+        assert_eq!(sanitize_bot_name("   "), "bot");
+    }
 }
 
 // ── Order ID ────────────────────────────────────────────────────────
@@ -181,7 +296,7 @@ pub fn gen_order_id(timestamp_ms: u64, seq: &mut u64) -> String {
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Global data timestamp (ms). Updated by the runner on every event.
-/// When `noTimestamp` is set, `simplelog` omits its wall-clock timestamp,
+/// When `noTimestamp` is set, the file layer omits its wall-clock timestamp,
 /// and log messages can include this instead for deterministic replay logs.
 static DATA_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
