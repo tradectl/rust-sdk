@@ -239,14 +239,29 @@ pub struct DbConfig {
 
 /// Logging configuration.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogConfig {
-    pub path: String,
-    pub mode: String,
+    /// Optional base directory. Default: `~/.tradectl/logs`.
+    /// Files land at `<base>/<config_name>/<config_name>_YYYY-MM-DD.log`.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// trace / debug / info / warn / error. Default: "info".
+    #[serde(default = "default_level")]
     pub level: String,
-    /// Disable timestamps in log output (useful for deterministic replay logs).
+
+    /// Days of history to retain (compressed + uncompressed).
+    /// `0` disables file logging entirely. Default: 30.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+
+    /// Disable wall-clock timestamps in log lines (replay determinism).
     #[serde(default)]
     pub no_timestamp: bool,
 }
+
+fn default_level() -> String { "info".into() }
+fn default_retention_days() -> u32 { 30 }
 
 /// A single strategy entry in the `strats` array.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -1135,5 +1150,44 @@ mod bot_config_name_tests {
         }"#;
         let cfg: BotConfig = serde_json::from_str(json).expect("parse");
         assert_eq!(cfg.name.as_deref(), Some("bncm03L"));
+    }
+}
+
+#[cfg(test)]
+mod log_config_tests {
+    use super::LogConfig;
+
+    #[test]
+    fn empty_object_uses_defaults() {
+        let cfg: LogConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.path, None);
+        assert_eq!(cfg.level, "info");
+        assert_eq!(cfg.retention_days, 30);
+        assert!(!cfg.no_timestamp);
+    }
+
+    #[test]
+    fn legacy_mode_field_is_ignored() {
+        let cfg: LogConfig = serde_json::from_str(
+            r#"{"path":"/var/log/x","mode":"console_file","level":"debug"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.path.as_deref(), Some("/var/log/x"));
+        assert_eq!(cfg.level, "debug");
+        assert_eq!(cfg.retention_days, 30);
+    }
+
+    #[test]
+    fn camel_case_retention_days() {
+        let cfg: LogConfig =
+            serde_json::from_str(r#"{"retentionDays":7}"#).unwrap();
+        assert_eq!(cfg.retention_days, 7);
+    }
+
+    #[test]
+    fn retention_zero_parses() {
+        let cfg: LogConfig =
+            serde_json::from_str(r#"{"retentionDays":0}"#).unwrap();
+        assert_eq!(cfg.retention_days, 0);
     }
 }
