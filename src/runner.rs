@@ -12,10 +12,33 @@ use std::sync::Mutex;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::filter::EnvFilter;
-use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
+
+/// Custom formatter: `[LEVEL] <message>` — matches the legacy simplelog
+/// baseline format. No wall-clock timestamp (bot lines self-describe with
+/// their own data-timestamp), no target.
+struct BracketedLevel;
+
+impl<S, N> FormatEvent<S, N> for BracketedLevel
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        write!(writer, "[{}] ", event.metadata().level())?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
 
 /// Held for the lifetime of the process so the non-blocking writer's
 /// background thread keeps draining log records until shutdown.
@@ -23,49 +46,66 @@ static LOG_GUARDS: OnceCell<Mutex<Vec<WorkerGuard>>> = OnceCell::new();
 static JANITOR: OnceCell<crate::logging::LogJanitor> = OnceCell::new();
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
 
-/// Initialise structured logging.
+/// Initialise structured logging with both stderr and file outputs.
 ///
 /// `name` is the per-bot identifier used in the log path:
 /// files land at `<base>/<sanitized>/<sanitized>.YYYY-MM-DD.log`.
 /// Pass the config-file stem (e.g. `bn-session-config`) so daemon and
 /// foreground runs share the same file. The name is sanitized before use
 /// as a path component — see [`sanitize_bot_name`].
+///
+/// This is the default for live and daemon runs. Replay paths that must
+/// keep stderr quiet (so the harness can diff log files) should call
+/// [`setup_logging_file_only`] instead.
 pub fn setup_logging(name: &str, config: &Option<crate::types::config::LogConfig>) {
-    LOG_INIT.call_once(|| init_inner(name, config));
+    LOG_INIT.call_once(|| init_inner(name, config, true));
 }
 
-fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
+/// Initialise structured logging with file output only — no stderr layer.
+///
+/// Use this for replay runs where the test harness diffs the rotating log
+/// file against a baseline and any incidental stderr output would flood
+/// the terminal (e.g. `make replay-check`). Live and daemon runs should
+/// keep using [`setup_logging`].
+///
+/// Shares the same once-init guard as [`setup_logging`], so the first
+/// call wins per process.
+pub fn setup_logging_file_only(name: &str, config: &Option<crate::types::config::LogConfig>) {
+    LOG_INIT.call_once(|| init_inner(name, config, false));
+}
+
+fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, console: bool) {
     let safe_name = sanitize_bot_name(name);
 
-    let (level, base_path, retention_days, no_timestamp) = match config {
-        Some(cfg) => (
-            cfg.level.as_str(),
-            cfg.path.clone(),
-            cfg.retention_days,
-            cfg.no_timestamp,
-        ),
-        None => ("info", None, 30, false),
+    let (level, base_path, retention_days) = match config {
+        Some(cfg) => (cfg.level.as_str(), cfg.path.clone(), cfg.retention_days),
+        None => ("info", None, 30),
     };
 
     // EnvFilter: RUST_LOG overrides config when set.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    let stderr_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
+    // Bot log lines self-describe (`[data-ts][bot/symbol] ...`), so we use
+    // a custom event formatter that emits `[LEVEL] <message>` — matches the
+    // legacy simplelog baseline and skips tracing's wall-clock + target.
+    fn make_layer<W>(writer: W) -> Box<dyn Layer<Registry> + Send + Sync>
+    where
+        W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+    {
         fmt::layer()
             .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .without_time()
+            .with_writer(writer)
+            .event_format(BracketedLevel)
             .boxed()
-    } else {
-        fmt::layer()
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .boxed()
-    };
+    }
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![stderr_layer];
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+
+    if console {
+        layers.push(make_layer(std::io::stderr));
+    }
 
     if retention_days > 0 {
         let dir = resolve_log_dir(base_path.as_deref(), &safe_name);
@@ -85,20 +125,7 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>) {
             Ok(appender) => {
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
                 guards.push(guard);
-
-                let file_layer: Box<dyn Layer<Registry> + Send + Sync> = if no_timestamp {
-                    fmt::layer()
-                        .with_ansi(false)
-                        .with_writer(non_blocking)
-                        .without_time()
-                        .boxed()
-                } else {
-                    fmt::layer()
-                        .with_ansi(false)
-                        .with_writer(non_blocking)
-                        .boxed()
-                };
-                layers.push(file_layer);
+                layers.push(make_layer(non_blocking));
 
                 // Background gzip + retention sweep.
                 let janitor = crate::logging::LogJanitor::spawn(

@@ -39,7 +39,7 @@ impl LogJanitor {
             .spawn(move || {
                 loop {
                     if let Err(e) = sweep_once(&dir, &prefix, retention_days) {
-                        eprintln!("log janitor: sweep failed: {e}");
+                        tracing::warn!("log janitor: sweep failed: {e}");
                     }
                     thread::sleep(SWEEP_INTERVAL);
                 }
@@ -74,7 +74,7 @@ pub fn sweep_once(dir: &Path, prefix: &str, retention_days: u32) -> io::Result<(
         // 1. Delete files older than cutoff (regardless of compression).
         if parsed.date < cutoff {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("log janitor: failed to delete {}: {e}", path.display());
+                tracing::warn!("log janitor: failed to delete {}: {e}", path.display());
             }
             continue;
         }
@@ -82,7 +82,7 @@ pub fn sweep_once(dir: &Path, prefix: &str, retention_days: u32) -> io::Result<(
         // 2. Gzip past-day uncompressed files.
         if !parsed.compressed && parsed.date < today {
             if let Err(e) = gzip_file(&path) {
-                eprintln!("log janitor: failed to gzip {}: {e}", path.display());
+                tracing::warn!("log janitor: failed to gzip {}: {e}", path.display());
             }
         }
     }
