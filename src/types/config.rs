@@ -11,8 +11,9 @@ use super::enums::Side;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
-    /// Operator-supplied name for this bot run. Used as the cell-identity key
-    /// in the analytics tab. Falls back to the config-file basename when None.
+    /// Operator-supplied name for this bot run. Used as the primary identity
+    /// in metrics reporting (`{name}@{hostname}`) and in the analytics tab.
+    /// Falls back to the config-file basename (CLI-derived) when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
