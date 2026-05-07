@@ -286,6 +286,11 @@ pub struct StratEntry {
     /// 0 = unlimited (default).
     #[serde(default)]
     pub max_order_count: usize,
+    /// Hold the SL client-side instead of placing it as STOP_MARKET on the
+    /// exchange. Avoids reduce-only-surplus auto-cancels on Binance USDM when
+    /// multiple strategies share a symbol. Defaults to `false`.
+    #[serde(default)]
+    pub virtual_sl: bool,
     #[serde(default)]
     pub pairs: Vec<String>,
     /// Send notifications (Telegram, etc.) for this strategy. Defaults to `true`.
