@@ -194,6 +194,27 @@ pub fn sanitize_bot_name(name: &str) -> String {
     out
 }
 
+/// Path to today's log file, mirroring what `setup_logging` writes via
+/// `tracing_appender::rolling::Rotation::DAILY`. Honours `LogConfig.path`,
+/// falls back to `~/.tradectl/logs/<safe_name>/`. Returns `None` when
+/// `retention_days == 0` (file logging disabled).
+///
+/// Used by the CLI to point users at the actual log file on daemon start.
+pub fn current_log_file(
+    name: &str,
+    config: &Option<crate::types::config::LogConfig>,
+) -> Option<PathBuf> {
+    let retention = config.as_ref().map(|c| c.retention_days).unwrap_or(30);
+    if retention == 0 {
+        return None;
+    }
+    let safe_name = sanitize_bot_name(name);
+    let base = config.as_ref().and_then(|c| c.path.as_deref());
+    let dir = resolve_log_dir(base, &safe_name);
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    Some(dir.join(format!("{safe_name}.{today}.log")))
+}
+
 fn resolve_log_dir(base: Option<&str>, sanitized_name: &str) -> PathBuf {
     let base_path = match base {
         Some(p) if !p.is_empty() => PathBuf::from(p),
@@ -262,6 +283,40 @@ mod logging_tests {
     fn resolve_log_dir_honours_custom_base() {
         let p = resolve_log_dir(Some("/var/log/tradectl/x"), "mybot");
         assert_eq!(p, std::path::PathBuf::from("/var/log/tradectl/x/mybot"));
+    }
+
+    #[test]
+    fn current_log_file_uses_custom_path_and_dated_suffix() {
+        let cfg = Some(crate::types::config::LogConfig {
+            path: Some("/var/log/tradectl/x".to_string()),
+            level: "info".to_string(),
+            retention_days: 30,
+            no_timestamp: false,
+        });
+        let p = current_log_file("mybot", &cfg).expect("file path");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let expected =
+            std::path::PathBuf::from(format!("/var/log/tradectl/x/mybot/mybot.{today}.log"));
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn current_log_file_returns_none_when_retention_zero() {
+        let cfg = Some(crate::types::config::LogConfig {
+            path: None,
+            level: "info".to_string(),
+            retention_days: 0,
+            no_timestamp: false,
+        });
+        assert!(current_log_file("mybot", &cfg).is_none());
+    }
+
+    #[test]
+    fn current_log_file_defaults_when_config_none() {
+        let p = current_log_file("mybot", &None).expect("file path");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let leaf = format!("mybot/mybot.{today}.log");
+        assert!(p.ends_with(&leaf), "got {}", p.display());
     }
 
     #[test]
