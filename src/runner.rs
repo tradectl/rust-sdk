@@ -18,10 +18,12 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
 
-/// Custom formatter: `[LEVEL] <message>` — matches the legacy simplelog
-/// baseline format. No wall-clock timestamp (bot lines self-describe with
-/// their own data-timestamp), no target.
-struct BracketedLevel;
+/// Custom formatter: `<rfc3339-utc> [LEVEL] <message>` — matches the
+/// legacy simplelog baseline format. No target. Set `with_time = false`
+/// to drop the leading timestamp (replay diffs, `LogConfig.no_timestamp`).
+struct BracketedLevel {
+    with_time: bool,
+}
 
 impl<S, N> FormatEvent<S, N> for BracketedLevel
 where
@@ -34,6 +36,11 @@ where
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
+        if self.with_time {
+            let ts = chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            write!(writer, "{ts} ")?;
+        }
         write!(writer, "[{}] ", event.metadata().level())?;
         ctx.field_format().format_fields(writer.by_ref(), event)?;
         writeln!(writer)
@@ -77,34 +84,39 @@ pub fn setup_logging_file_only(name: &str, config: &Option<crate::types::config:
 fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, console: bool) {
     let safe_name = sanitize_bot_name(name);
 
-    let (level, base_path, retention_days) = match config {
-        Some(cfg) => (cfg.level.as_str(), cfg.path.clone(), cfg.retention_days),
-        None => ("info", None, 30),
+    let (level, base_path, retention_days, no_timestamp) = match config {
+        Some(cfg) => (
+            cfg.level.as_str(),
+            cfg.path.clone(),
+            cfg.retention_days,
+            cfg.no_timestamp,
+        ),
+        None => ("info", None, 30, false),
     };
 
     // EnvFilter: RUST_LOG overrides config when set.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    // Bot log lines self-describe (`[data-ts][bot/symbol] ...`), so we use
-    // a custom event formatter that emits `[LEVEL] <message>` — matches the
-    // legacy simplelog baseline and skips tracing's wall-clock + target.
-    fn make_layer<W>(writer: W) -> Box<dyn Layer<Registry> + Send + Sync>
+    // Custom event formatter: `<rfc3339-utc> [LEVEL] <message>`. Drops
+    // tracing's default span/target prefix to match the legacy baseline.
+    fn make_layer<W>(writer: W, with_time: bool) -> Box<dyn Layer<Registry> + Send + Sync>
     where
         W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
     {
         fmt::layer()
             .with_ansi(false)
             .with_writer(writer)
-            .event_format(BracketedLevel)
+            .event_format(BracketedLevel { with_time })
             .boxed()
     }
+    let with_time = !no_timestamp;
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     if console {
-        layers.push(make_layer(std::io::stderr));
+        layers.push(make_layer(std::io::stderr, with_time));
     }
 
     if retention_days > 0 {
@@ -125,7 +137,7 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
             Ok(appender) => {
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
                 guards.push(guard);
-                layers.push(make_layer(non_blocking));
+                layers.push(make_layer(non_blocking, with_time));
 
                 // Background gzip + retention sweep.
                 let janitor = crate::logging::LogJanitor::spawn(
