@@ -105,6 +105,19 @@ pub trait MarketAdapter: Send + Sync {
     async fn get_max_leverage(&self, _symbol: &str) -> ExchangeResult<u32> {
         Ok(if self.market_type() == MarketType::Spot { 1 } else { 125 })
     }
+    /// Auto-adjust leverage for newly-subscribed symbols. Re-fetches
+    /// bracket caps and lowers any symbol whose current leverage exceeds
+    /// the exchange's first-bracket max. Called by the runner right after
+    /// `subscribe_pairs` so every traded symbol is checked at the moment
+    /// it's added (initial config + dynamic pair-selector adds). Returns
+    /// the list of `(symbol, old, new)` triples that were lowered.
+    /// Default: no-op for adapters without a leverage concept.
+    async fn try_auto_adjust_all_leverage(
+        &self,
+        _symbols: &[String],
+    ) -> ExchangeResult<Vec<(String, f64, u32)>> {
+        Ok(Vec::new())
+    }
     /// Switch between cross and isolated margin for a futures symbol.
     /// Default is a no-op (returns Ok) so adapters that don't support it
     /// — spot, paper, replay, exchanges without an exposed endpoint —
