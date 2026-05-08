@@ -423,15 +423,14 @@ pub fn trunc5(v: f64) -> String {
 // format is defined once.
 
 /// Core order log: `[timestamp] [cid][name/symbol] message`.
-/// Uses data timestamp when set (replay mode), omits it otherwise.
+/// Uses the data timestamp when set (replay), system wall-clock otherwise (live).
 pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
-    let ts = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
-    if ts > 0 {
-        let ts_str = format_data_ts();
-        log::info!("[{}] [{}][{}/{}] {}", ts_str, cid, name, symbol, msg);
+    let ts_str = if DATA_TIMESTAMP_MS.load(Ordering::Relaxed) > 0 {
+        format_data_ts()
     } else {
-        log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
-    }
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    };
+    log::info!("[{}] [{}][{}/{}] {}", ts_str, cid, name, symbol, msg);
 }
 
 /// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
