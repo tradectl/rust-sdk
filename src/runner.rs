@@ -36,9 +36,18 @@ where
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
+        // Prefer the runner's data-timestamp when set (replay walks
+        // historical events; wall-clock would lie). Fall back to wall-clock
+        // for live runs. `with_time = false` (replay-diff harness opt-in)
+        // suppresses both.
         if self.with_time {
-            let ts = chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            let data_ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
+            let ts = if data_ms > 0 {
+                format_data_ts()
+            } else {
+                chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            };
             write!(writer, "{ts} ")?;
         }
         write!(writer, "[{}] ", event.metadata().level())?;
@@ -434,15 +443,11 @@ pub fn trunc5(v: f64) -> String {
 // Both the LoggingAdapter and paper runner call these so that the
 // format is defined once.
 
-/// Core order log: `[timestamp] [cid][name/symbol] message`.
-/// Uses the data timestamp when set (replay), system wall-clock otherwise (live).
+/// Core order log: `[cid][name/symbol] message`.
+/// Timestamp is added by the global formatter (data-ts in replay,
+/// wall-clock otherwise) — emitting one here would double-stamp the line.
 pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
-    let ts_str = if DATA_TIMESTAMP_MS.load(Ordering::Relaxed) > 0 {
-        format_data_ts()
-    } else {
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-    };
-    log::info!("[{}] [{}][{}/{}] {}", ts_str, cid, name, symbol, msg);
+    log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
 }
 
 /// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
