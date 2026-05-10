@@ -257,7 +257,7 @@ pub struct LogConfig {
     pub retention_days: u32,
 
     /// Disable wall-clock timestamps in log lines (replay determinism).
-    #[serde(default)]
+    #[serde(default, alias = "no_timestamp")]
     pub no_timestamp: bool,
 }
 

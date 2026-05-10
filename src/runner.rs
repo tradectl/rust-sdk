@@ -18,12 +18,12 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
 
-/// Custom formatter: `<rfc3339-utc> [LEVEL] <message>` — matches the
-/// legacy simplelog baseline format. No target. Set `with_time = false`
-/// to drop the leading timestamp (replay diffs, `LogConfig.no_timestamp`).
-struct BracketedLevel {
-    with_time: bool,
-}
+/// Custom formatter: `<ts> [LEVEL] <message>`. Timestamp comes from the
+/// runner's WS event clock when set (replay walks historical events and
+/// wall-clock would lie); falls back to wall-clock for live mode before
+/// any event has arrived. One ts per line, prepended once here — call
+/// sites must not re-stamp.
+struct BracketedLevel;
 
 impl<S, N> FormatEvent<S, N> for BracketedLevel
 where
@@ -36,12 +36,13 @@ where
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
-        if self.with_time {
-            let ts = chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-            write!(writer, "{ts} ")?;
-        }
-        write!(writer, "[{}] ", event.metadata().level())?;
+        let data_ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
+        let ts = if data_ms > 0 {
+            format_data_ts()
+        } else {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+        };
+        write!(writer, "{ts} [{}] ", event.metadata().level())?;
         ctx.field_format().format_fields(writer.by_ref(), event)?;
         writeln!(writer)
     }
@@ -84,39 +85,37 @@ pub fn setup_logging_file_only(name: &str, config: &Option<crate::types::config:
 fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, console: bool) {
     let safe_name = sanitize_bot_name(name);
 
-    let (level, base_path, retention_days, no_timestamp) = match config {
+    let (level, base_path, retention_days) = match config {
         Some(cfg) => (
             cfg.level.as_str(),
             cfg.path.clone(),
             cfg.retention_days,
-            cfg.no_timestamp,
         ),
-        None => ("info", None, 30, false),
+        None => ("info", None, 30),
     };
 
     // EnvFilter: RUST_LOG overrides config when set.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    // Custom event formatter: `<rfc3339-utc> [LEVEL] <message>`. Drops
-    // tracing's default span/target prefix to match the legacy baseline.
-    fn make_layer<W>(writer: W, with_time: bool) -> Box<dyn Layer<Registry> + Send + Sync>
+    // Custom event formatter: `<ts> [LEVEL] <message>`. Drops tracing's
+    // default span/target prefix. See `BracketedLevel` for ts semantics.
+    fn make_layer<W>(writer: W) -> Box<dyn Layer<Registry> + Send + Sync>
     where
         W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
     {
         fmt::layer()
             .with_ansi(false)
             .with_writer(writer)
-            .event_format(BracketedLevel { with_time })
+            .event_format(BracketedLevel)
             .boxed()
     }
-    let with_time = !no_timestamp;
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     if console {
-        layers.push(make_layer(std::io::stderr, with_time));
+        layers.push(make_layer(std::io::stderr));
     }
 
     if retention_days > 0 {
@@ -137,7 +136,7 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
             Ok(appender) => {
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
                 guards.push(guard);
-                layers.push(make_layer(non_blocking, with_time));
+                layers.push(make_layer(non_blocking));
 
                 // Background gzip + retention sweep.
                 let janitor = crate::logging::LogJanitor::spawn(
@@ -389,9 +388,10 @@ pub fn gen_order_id(timestamp_ms: u64, seq: &mut u64) -> String {
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Global data timestamp (ms). Updated by the runner on every event.
-/// When `noTimestamp` is set, the file layer omits its wall-clock timestamp,
-/// and log messages can include this instead for deterministic replay logs.
+/// Global WS event timestamp (ms). Updated by the runner on every event.
+/// `log_order` reads this so order log lines carry the WS-event time
+/// (deterministic in replay; falls back to wall-clock only before any
+/// event has arrived in live).
 static DATA_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Set the current data timestamp (called by the runner on every event).
@@ -399,14 +399,16 @@ pub fn set_data_timestamp(ms: u64) {
     DATA_TIMESTAMP_MS.store(ms, Ordering::Relaxed);
 }
 
-/// Format a millisecond timestamp as ISO 8601 (e.g. `2025-01-12T10:30:45.123Z`).
+/// Format the global WS-event timestamp as RFC3339 with millisecond
+/// precision (e.g. `2025-01-12T10:30:45.123Z`) — matches the resolution
+/// of the source data, no fake-zero padding.
 pub fn format_data_ts() -> String {
     let ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
     if ms == 0 { return String::new(); }
     let secs = (ms / 1000) as i64;
     let nanos = ((ms % 1000) * 1_000_000) as u32;
     chrono::DateTime::from_timestamp(secs, nanos)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| format!("{}ms", ms))
 }
 
@@ -434,15 +436,19 @@ pub fn trunc5(v: f64) -> String {
 // Both the LoggingAdapter and paper runner call these so that the
 // format is defined once.
 
-/// Core order log: `[timestamp] [cid][name/symbol] message`.
-/// Uses the data timestamp when set (replay), system wall-clock otherwise (live).
+/// Core order log: `[cid][name/symbol] message`. The leading timestamp
+/// is added by the global formatter (WS-event time in replay, wall-clock
+/// otherwise) — emitting one here would double-stamp the line.
 pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
-    let ts_str = if DATA_TIMESTAMP_MS.load(Ordering::Relaxed) > 0 {
-        format_data_ts()
-    } else {
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-    };
-    log::info!("[{}] [{}][{}/{}] {}", ts_str, cid, name, symbol, msg);
+    log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
+}
+
+/// Telegram-mirror log: `[TG] message`. Strips Telegram-Markdown `\_`
+/// escapes from the body — the on-wire Telegram message keeps them; only
+/// the human-facing log shows the unescaped form.
+pub fn log_tg(msg: impl AsRef<str>) {
+    let display = msg.as_ref().replace("\\_", "_");
+    log::info!("[TG] {}", display);
 }
 
 /// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
