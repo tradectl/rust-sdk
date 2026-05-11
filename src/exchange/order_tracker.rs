@@ -179,6 +179,11 @@ impl OrderTracker {
             .map(|(cid, _)| cid.clone())
     }
 
+    /// Is the tracked entry count at or above `max`? `max == 0` means unlimited.
+    pub fn is_full(&self, max: usize) -> bool {
+        max != 0 && self.entry_count() >= max
+    }
+
     /// All cids currently tracked as entries for a given symbol (regardless of slot).
     pub fn entry_cids_for_symbol(&self, symbol: &str) -> Vec<String> {
         self.entry_metadata.keys()
@@ -415,6 +420,18 @@ mod tests {
         assert_eq!(got, vec!["CA".to_string(), "CB".to_string()]);
 
         assert_eq!(tracker.entry_cids_for_symbol("SOLUSDT"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn is_full_respects_max() {
+        let mut tracker = OrderTracker::new();
+        assert!(!tracker.is_full(2));
+
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), EntryMetadata::default());
+        tracker.track_entry(make_order("BTCUSDT", "B", Some("CB")), EntryMetadata::default());
+        assert!(tracker.is_full(2));
+        assert!(!tracker.is_full(3));
+        assert!(!tracker.is_full(0), "max==0 means unlimited");
     }
 
     #[test]
