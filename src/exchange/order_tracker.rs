@@ -168,6 +168,27 @@ impl OrderTracker {
         self.entry_metadata.keys()
     }
 
+    /// Find the cid of an entry by (symbol, slot). Returns `None` if no entry
+    /// is currently tracked for that slot.
+    pub fn entry_cid_for_slot(&self, symbol: &str, slot: &str) -> Option<String> {
+        self.entry_metadata.iter()
+            .find(|(cid, m)| {
+                m.slot.as_deref() == Some(slot)
+                    && self.orders.get(symbol).is_some_and(|sm| sm.contains_key(*cid))
+            })
+            .map(|(cid, _)| cid.clone())
+    }
+
+    /// All cids currently tracked as entries for a given symbol (regardless of slot).
+    pub fn entry_cids_for_symbol(&self, symbol: &str) -> Vec<String> {
+        self.entry_metadata.keys()
+            .filter(|cid| {
+                self.orders.get(symbol).is_some_and(|sm| sm.contains_key(*cid))
+            })
+            .cloned()
+            .collect()
+    }
+
     // ── Event Callbacks ──────────────────────────────────────────
 
     pub fn on_fill(&mut self, cb: OrderEventCallback) {
@@ -368,6 +389,32 @@ mod tests {
     fn remove_entry_returns_false_when_absent() {
         let mut tracker = OrderTracker::new();
         assert!(!tracker.remove_entry("BTCUSDT", "nonexistent"));
+    }
+
+    #[test]
+    fn entry_cid_for_slot_finds_by_symbol_and_slot() {
+        let mut tracker = OrderTracker::new();
+        let mut meta = EntryMetadata::default();
+        meta.slot = Some("_".into());
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), meta);
+
+        assert_eq!(tracker.entry_cid_for_slot("BTCUSDT", "_").as_deref(), Some("CA"));
+        assert_eq!(tracker.entry_cid_for_slot("BTCUSDT", "other"), None);
+        assert_eq!(tracker.entry_cid_for_slot("ETHUSDT", "_"), None);
+    }
+
+    #[test]
+    fn entry_cids_for_symbol_returns_all_tracked_cids() {
+        let mut tracker = OrderTracker::new();
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), EntryMetadata::default());
+        tracker.track_entry(make_order("BTCUSDT", "B", Some("CB")), EntryMetadata::default());
+        tracker.track_entry(make_order("ETHUSDT", "C", Some("CC")), EntryMetadata::default());
+
+        let mut got = tracker.entry_cids_for_symbol("BTCUSDT");
+        got.sort();
+        assert_eq!(got, vec!["CA".to_string(), "CB".to_string()]);
+
+        assert_eq!(tracker.entry_cids_for_symbol("SOLUSDT"), Vec::<String>::new());
     }
 
     #[test]
