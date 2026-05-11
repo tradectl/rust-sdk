@@ -355,7 +355,7 @@ cargo test                            # ~36 tests (profit, errors, types)
 | HTTP 5xx without JSON body | `serde_json::from_str()` fails. Creates Unknown error with `code = -(http_status)` | Network/exchange outages don't crash the parser |
 | HTTP 418 + message contains "banned" | `ApiErrorKind::IpBanned`. `is_silent()=true` (no Telegram). `is_retryable()=false` | IP bans are persistent. Retrying makes it worse |
 | HTTP 429 vs HTTP 418 with same error code | 429 → `RateLimited` (retryable). 418 → `IpBanned` (not retryable). **HTTP status is the differentiator** | Same error code can mean different things depending on HTTP status |
-| Message contains "balance" but code is unrecognized | Classified as `InsufficientMargin` via keyword fallback. `is_persistent()=true` → stops strategy | Catches exchange variations that don't use standard codes |
+| Message contains "balance" but code is unrecognized | Classified as `InsufficientMargin` via keyword fallback. `is_recoverable()=true` → cancel resting entry, pause symbol 60 s; second strike escalates to stop | Catches exchange variations that don't use standard codes |
 
 ### BotState
 
