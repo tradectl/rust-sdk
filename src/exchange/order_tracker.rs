@@ -96,6 +96,7 @@ impl OrderTracker {
 
     pub fn clear(&mut self) {
         self.orders.clear();
+        self.entry_metadata.clear();
     }
 
     // ── Entry tracking (runner-side) ─────────────────────────────
@@ -142,11 +143,19 @@ impl OrderTracker {
         }
     }
 
-    /// Remove an entry and its metadata. Returns `true` if the entry was present.
+    /// Remove an entry and its metadata. Returns `true` when both the order
+    /// and the metadata were present (the normal case for a tracked entry);
+    /// `false` when neither was present. A return of `true` from only one
+    /// side would indicate the two maps had drifted — they are maintained
+    /// in lockstep by `track_entry`, so that should not happen in practice.
     pub fn remove_entry(&mut self, symbol: &str, client_order_id: &str) -> bool {
         let order_removed = self.remove_order(symbol, client_order_id);
         let meta_removed = self.entry_metadata.remove(client_order_id).is_some();
-        order_removed || meta_removed
+        debug_assert_eq!(
+            order_removed, meta_removed,
+            "OrderTracker entry maps drifted for cid {client_order_id}",
+        );
+        order_removed && meta_removed
     }
 
     /// Number of entries currently tracked across all symbols.
@@ -291,7 +300,7 @@ mod tests {
             cum_filled_qty: 0.0,
             entry_price: 50000.0,
         };
-        tracker.track_entry(order, meta.clone());
+        tracker.track_entry(order, meta);
 
         assert!(tracker.contains_entry("CLIENT-1"));
         let got = tracker.get_entry_metadata("CLIENT-1").expect("metadata present");
@@ -339,6 +348,26 @@ mod tests {
         assert!(first, "first mark_filled should report 'was not previously filled'");
         let second = tracker.mark_filled("CA");
         assert!(!second, "second mark_filled should report 'already filled'");
+    }
+
+    #[test]
+    fn clear_drops_entry_metadata() {
+        let mut tracker = OrderTracker::new();
+        tracker.track_entry(
+            make_order("BTCUSDT", "A", Some("CA")),
+            EntryMetadata::default(),
+        );
+        assert_eq!(tracker.entry_count(), 1);
+
+        tracker.clear();
+        assert_eq!(tracker.entry_count(), 0);
+        assert!(!tracker.contains_entry("CA"));
+    }
+
+    #[test]
+    fn remove_entry_returns_false_when_absent() {
+        let mut tracker = OrderTracker::new();
+        assert!(!tracker.remove_entry("BTCUSDT", "nonexistent"));
     }
 
     #[test]
