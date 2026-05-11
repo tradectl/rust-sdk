@@ -1,13 +1,35 @@
 use std::collections::HashMap;
 use crate::types::Order;
+use crate::strategy::ExitOrder;
 
 pub type OrderEventCallback = Box<dyn Fn(&Order) + Send + Sync>;
+
+/// Per-entry runner-side metadata kept alongside the raw `Order` in the tracker.
+/// This is what was previously fragmented across `entry_exits`, `entry_prices`,
+/// `filled_entry_cids`, and `active_entries` in the live runner.
+#[derive(Clone, Debug, Default)]
+pub struct EntryMetadata {
+    /// Multi-slot strategy: which slot id this entry occupies
+    /// (`"_"` for single-slot mode).
+    pub slot: Option<String>,
+    /// Exits (TP/SL) to place once the entry fills.
+    pub pending_exits: Vec<ExitOrder>,
+    /// Has `on_fill` already been dispatched for this entry?
+    /// (Race-fill guard.)
+    pub fire_once_fill: bool,
+    /// Cumulative filled quantity reported by the exchange; used to derive
+    /// per-event fill delta against amendment echoes.
+    pub cum_filled_qty: f64,
+    /// Entry price recorded at placement time (used by chase-edit logic).
+    pub entry_price: f64,
+}
 
 /// In-memory order state manager. Tracks orders across all trading pairs.
 /// Exchange-specific fill detection is handled by the exchange implementation,
 /// which calls the mutation and emit methods on this store.
 pub struct OrderTracker {
     orders: HashMap<String, HashMap<String, Order>>,
+    entry_metadata: HashMap<String, EntryMetadata>,
     fill_callbacks: Vec<OrderEventCallback>,
     complete_callbacks: Vec<OrderEventCallback>,
     partial_fill_callbacks: Vec<OrderEventCallback>,
@@ -17,6 +39,7 @@ impl OrderTracker {
     pub fn new() -> Self {
         Self {
             orders: HashMap::new(),
+            entry_metadata: HashMap::new(),
             fill_callbacks: Vec::new(),
             complete_callbacks: Vec::new(),
             partial_fill_callbacks: Vec::new(),
@@ -73,6 +96,67 @@ impl OrderTracker {
 
     pub fn clear(&mut self) {
         self.orders.clear();
+    }
+
+    // ── Entry tracking (runner-side) ─────────────────────────────
+
+    /// Track an entry order with its runner-side metadata.
+    pub fn track_entry(&mut self, order: Order, metadata: EntryMetadata) {
+        let cid = order
+            .client_order_id
+            .clone()
+            .unwrap_or_else(|| order.order_id.clone());
+        self.entry_metadata.insert(cid.clone(), metadata);
+        self.orders
+            .entry(order.symbol.clone())
+            .or_default()
+            .insert(cid, order);
+    }
+
+    /// Is this cid known as a tracked entry (regardless of fill status)?
+    pub fn contains_entry(&self, client_order_id: &str) -> bool {
+        self.entry_metadata.contains_key(client_order_id)
+    }
+
+    /// Read-only access to entry metadata.
+    pub fn get_entry_metadata(&self, client_order_id: &str) -> Option<&EntryMetadata> {
+        self.entry_metadata.get(client_order_id)
+    }
+
+    /// Mutable access to entry metadata for in-place updates
+    /// (e.g. updating `cum_filled_qty`).
+    pub fn get_entry_metadata_mut(&mut self, client_order_id: &str) -> Option<&mut EntryMetadata> {
+        self.entry_metadata.get_mut(client_order_id)
+    }
+
+    /// Mark an entry as having dispatched `on_fill`. Returns `true` if this is
+    /// the first call (i.e. the caller should run the fill handler) and
+    /// `false` if `on_fill` has already been dispatched for this cid.
+    pub fn mark_filled(&mut self, client_order_id: &str) -> bool {
+        match self.entry_metadata.get_mut(client_order_id) {
+            Some(m) if !m.fire_once_fill => {
+                m.fire_once_fill = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remove an entry and its metadata. Returns `true` if the entry was present.
+    pub fn remove_entry(&mut self, symbol: &str, client_order_id: &str) -> bool {
+        let order_removed = self.remove_order(symbol, client_order_id);
+        let meta_removed = self.entry_metadata.remove(client_order_id).is_some();
+        order_removed || meta_removed
+    }
+
+    /// Number of entries currently tracked across all symbols.
+    pub fn entry_count(&self) -> usize {
+        self.entry_metadata.len()
+    }
+
+    /// All tracked entry cids (for iteration / cap-check / shutdown sweeps).
+    pub fn entry_cids(&self) -> impl Iterator<Item = &String> {
+        self.entry_metadata.keys()
     }
 
     // ── Event Callbacks ──────────────────────────────────────────
@@ -194,6 +278,67 @@ mod tests {
         tracker.clear();
         assert!(!tracker.has_open_orders("BTCUSDT"));
         assert!(!tracker.has_open_orders("ETHUSDT"));
+    }
+
+    #[test]
+    fn track_entry_stores_metadata() {
+        let mut tracker = OrderTracker::new();
+        let order = make_order("BTCUSDT", "ORD-1", Some("CLIENT-1"));
+        let meta = EntryMetadata {
+            slot: Some("_".into()),
+            pending_exits: vec![],
+            fire_once_fill: false,
+            cum_filled_qty: 0.0,
+            entry_price: 50000.0,
+        };
+        tracker.track_entry(order, meta.clone());
+
+        assert!(tracker.contains_entry("CLIENT-1"));
+        let got = tracker.get_entry_metadata("CLIENT-1").expect("metadata present");
+        assert_eq!(got.slot.as_deref(), Some("_"));
+        assert_eq!(got.entry_price, 50000.0);
+    }
+
+    #[test]
+    fn remove_entry_drops_both_order_and_metadata() {
+        let mut tracker = OrderTracker::new();
+        tracker.track_entry(
+            make_order("BTCUSDT", "ORD-1", Some("C1")),
+            EntryMetadata::default(),
+        );
+        assert!(tracker.contains_entry("C1"));
+
+        let removed = tracker.remove_entry("BTCUSDT", "C1");
+        assert!(removed);
+        assert!(!tracker.contains_entry("C1"));
+        assert!(tracker.get_entry_metadata("C1").is_none());
+    }
+
+    #[test]
+    fn entry_count_reflects_tracked_entries() {
+        let mut tracker = OrderTracker::new();
+        assert_eq!(tracker.entry_count(), 0);
+
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), EntryMetadata::default());
+        tracker.track_entry(make_order("ETHUSDT", "B", Some("CB")), EntryMetadata::default());
+        assert_eq!(tracker.entry_count(), 2);
+
+        tracker.remove_entry("BTCUSDT", "CA");
+        assert_eq!(tracker.entry_count(), 1);
+    }
+
+    #[test]
+    fn mark_filled_sets_fire_once_and_returns_prior_state() {
+        let mut tracker = OrderTracker::new();
+        tracker.track_entry(
+            make_order("BTCUSDT", "A", Some("CA")),
+            EntryMetadata::default(),
+        );
+
+        let first = tracker.mark_filled("CA");
+        assert!(first, "first mark_filled should report 'was not previously filled'");
+        let second = tracker.mark_filled("CA");
+        assert!(!second, "second mark_filled should report 'already filled'");
     }
 
     #[test]
