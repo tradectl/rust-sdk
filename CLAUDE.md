@@ -287,7 +287,8 @@ pub enum ApiErrorKind {
 | Method | Returns true for | Runner behavior |
 |--------|-----------------|-----------------|
 | `is_fatal()` | Unauthorized, SymbolNotTrading | Stop all trading |
-| `is_persistent()` | InsufficientMargin, QuantityExceeded, MinNotional | Stop strategy |
+| `is_persistent()` | QuantityExceeded, MinNotional, MaxPositionExceeded | Stop strategy after MAX_PERSISTENT_ERRORS |
+| `is_recoverable()` | InsufficientMargin | Cancel resting entry, pause symbol 60 s; second strike escalates to stop |
 | `is_retryable()` | Network, RateLimited | Retry with backoff |
 | `is_silent()` | OrderNotFound, SamePrice, ReduceOnlyRejected, SlTriggerPrice, DuplicateOrderId, TooManyOrders, IpBanned, MaxPositionExceeded | No Telegram alert |
 | `is_margin()` | InsufficientMargin | Specific margin handling |
