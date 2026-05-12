@@ -334,7 +334,7 @@ unsafe impl Sync for StrategyPlugin {}
 ///
 /// Call once in your `lib.rs`:
 /// ```rust,ignore
-/// tradectl_sdk::declare_strategy!("bounce-back", BounceBack::new);
+/// tradectl_sdk::declare_strategy!("shot", Shot::new);
 /// ```
 ///
 /// This exports a C-compatible entry point that the `tradectl` CLI loads at runtime.
@@ -361,9 +361,9 @@ macro_rules! declare_strategy {
 /// The batch factory enables ~1000x throughput for shadow parameter optimization.
 /// ```rust,ignore
 /// tradectl_sdk::declare_batch_strategy!(
-///     "bounce-back",
-///     BounceBack::new,
-///     BounceBackBatch::new,
+///     "shot",
+///     Shot::new,
+///     ShotBatch::new,
 /// );
 /// ```
 #[macro_export]
