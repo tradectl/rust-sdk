@@ -128,11 +128,28 @@ impl ExchangeApiError {
         self.kind == ApiErrorKind::InsufficientMargin
     }
 
-    /// Persistent errors that should stop the strategy (not the bot) after repeated failures.
-    /// Covers margin errors and quantity-exceeded — both indicate the strategy's parameters
-    /// are incompatible with the current account/exchange state.
+    /// Errors that the strategy can plausibly recover from on its own
+    /// timescale — the account-level constraint that produced the error
+    /// frees up as other positions close or as the operator adjusts
+    /// leverage. Today the only kind in this class is `InsufficientMargin`.
+    ///
+    /// Runner contract: cancel the offending resting order, set a short
+    /// per-symbol pause, keep the strategy alive. If a second recoverable
+    /// error fires before any successful placement, escalate to a hard
+    /// stop (the underlying constraint isn't clearing).
+    pub fn is_recoverable(&self) -> bool {
+        self.kind == ApiErrorKind::InsufficientMargin
+    }
+
+    /// Persistent errors that should stop the strategy (not the bot) after
+    /// repeated failures. These signal a permanent mismatch between the
+    /// strategy's params and the exchange/account state — retrying with
+    /// the same params will keep failing.
+    ///
+    /// Excludes `InsufficientMargin`, which is recoverable on the wall
+    /// clock and routed through `is_recoverable()` instead.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::InsufficientMargin | ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded)
+        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
@@ -243,6 +260,8 @@ mod tests {
         let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
         assert!(err.is_margin());
+        assert!(err.is_recoverable(), "margin is recoverable");
+        assert!(!err.is_persistent(), "margin must NOT be persistent");
         assert!(!err.is_fatal());
     }
 
@@ -252,6 +271,8 @@ mod tests {
         let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
         assert!(err.is_margin());
+        assert!(err.is_recoverable());
+        assert!(!err.is_persistent());
     }
 
     #[test]
@@ -308,13 +329,14 @@ mod tests {
     }
 
     #[test]
-    fn persistent_covers_margin_and_quantity() {
+    fn persistent_excludes_margin_but_covers_quantity() {
         let margin = ExchangeApiError::from_response(
             400,
             r#"{"code":-2019,"msg":"Margin is insufficient."}"#,
             "POST /fapi/v1/order".into(),
         );
-        assert!(margin.is_persistent());
+        assert!(!margin.is_persistent(), "margin is no longer persistent");
+        assert!(margin.is_recoverable());
         assert!(margin.is_margin());
 
         let qty = ExchangeApiError::from_response(
@@ -323,6 +345,7 @@ mod tests {
             "POST /fapi/v1/order".into(),
         );
         assert!(qty.is_persistent());
+        assert!(!qty.is_recoverable());
         assert!(!qty.is_margin());
     }
 
@@ -343,5 +366,38 @@ mod tests {
         assert!(s.contains("GET /fapi/v1/order"));
         assert!(s.contains("400"));
         assert!(s.contains("-2013"));
+    }
+
+    #[test]
+    fn margin_is_recoverable_not_persistent() {
+        let err = ExchangeApiError {
+            kind: ApiErrorKind::InsufficientMargin,
+            code: -2019,
+            message: "Margin is insufficient.".into(),
+            endpoint: "POST /fapi/v1/order".into(),
+            http_status: 400,
+        };
+        assert!(err.is_recoverable(), "margin must classify as recoverable");
+        assert!(!err.is_persistent(), "margin must NOT classify as persistent");
+        assert!(err.is_margin(), "is_margin still true for code-site readers");
+    }
+
+    #[test]
+    fn other_persistent_kinds_stay_persistent_and_not_recoverable() {
+        for kind in [
+            ApiErrorKind::QuantityExceeded,
+            ApiErrorKind::MinNotional,
+            ApiErrorKind::MaxPositionExceeded,
+        ] {
+            let err = ExchangeApiError {
+                kind,
+                code: -9999,
+                message: "test".into(),
+                endpoint: "test".into(),
+                http_status: 400,
+            };
+            assert!(err.is_persistent(), "{:?} must remain persistent", kind);
+            assert!(!err.is_recoverable(), "{:?} must NOT be recoverable", kind);
+        }
     }
 }

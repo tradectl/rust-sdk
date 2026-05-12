@@ -322,8 +322,15 @@ impl MarketAdapter for TestExchange {
 
     async fn place_order(&self, request: &OrderRequest) -> ExchangeResult<Order> {
         let id_num = self.next_order_id.fetch_add(1, Ordering::Relaxed);
-        let order_id = format!("TEST-{}", id_num);
-        let client_order_id = request.client_order_id.clone().unwrap_or_else(|| order_id.clone());
+        // When the caller supplies a client_order_id, use it as order_id too
+        // so that WS callbacks (which set client_order_id on the Order) and
+        // cancel_order (which keys open_orders by order_id) both refer to the
+        // same string — matching real-exchange behaviour where the CID is the
+        // canonical identifier surfaced in all order update events.
+        let order_id = request.client_order_id
+            .clone()
+            .unwrap_or_else(|| format!("TEST-{}", id_num));
+        let client_order_id = order_id.clone();
         let now = Self::now_ms();
 
         let is_market = request.order_type == OrderType::Market;
