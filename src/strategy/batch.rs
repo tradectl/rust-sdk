@@ -89,7 +89,7 @@ pub struct BatchResult {
 ///
 /// Strategies provide a batch implementation via [`declare_batch_strategy!`]:
 /// ```rust,ignore
-/// declare_batch_strategy!("bounce-back", BounceBack::new, BounceBackBatch::new);
+/// declare_batch_strategy!("shot", Shot::new, ShotBatch::new);
 /// ```
 ///
 /// TODO(depth-in-batch): `BatchStrategy` currently sees only tickers and
