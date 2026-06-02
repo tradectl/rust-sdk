@@ -333,6 +333,26 @@ impl BotState {
         self.strategy_docs.write().await.insert(strategy_name.to_string(), doc);
     }
 
+    // ── Sync, non-blocking reads (for the sync reader traits) ──
+
+    /// Non-blocking snapshot of open positions, for the sync
+    /// [`crate::reader::PositionReader`] trait used by the HTTP API.
+    /// Returns an empty `Vec` if a writer currently holds the lock — a
+    /// momentary contention that the next poll resolves. Never blocks the
+    /// async runtime, so it is safe to call from inside an axum handler.
+    pub fn try_get_positions(&self) -> Vec<PositionSnapshot> {
+        self.positions
+            .try_read()
+            .map(|p| p.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Non-blocking clone of bot metadata, for the sync status path.
+    /// `None` if a writer holds the lock at this instant.
+    pub fn try_get_meta(&self) -> Option<BotMeta> {
+        self.meta.try_read().map(|m| m.clone()).ok()
+    }
+
     // ── Read methods (called by MCP/AI) ────────────────────────
 
     /// Get all open positions, optionally filtered by symbol.
@@ -581,5 +601,14 @@ impl BotState {
 
         comparisons.sort_by(|a, b| b.pnl_usd.partial_cmp(&a.pnl_usd).unwrap_or(std::cmp::Ordering::Equal));
         comparisons
+    }
+}
+
+/// Sync, non-blocking position access for the HTTP API. The impl lives
+/// here (not in `tradectl-live`) because both the trait and `BotState` are
+/// SDK-owned — the orphan rule forbids implementing it downstream.
+impl crate::reader::PositionReader for BotState {
+    fn positions(&self) -> Vec<PositionSnapshot> {
+        self.try_get_positions()
     }
 }

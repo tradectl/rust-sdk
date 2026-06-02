@@ -4,6 +4,7 @@ pub mod exchange;
 pub mod runner;
 pub mod logging;
 pub mod bot_state;
+pub mod reader;
 #[cfg(feature = "monitor")]
 pub mod monitor;
 #[cfg(feature = "runner")]
@@ -12,6 +13,10 @@ mod run_cli;
 // Re-export top-level for convenience
 pub use types::*;
 pub use strategy::*;
+pub use reader::{
+    CloseReason, PositionReader, StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader,
+    TradeReaderError, TradeRow,
+};
 
 /// Entry point for self-contained strategy binaries.
 ///

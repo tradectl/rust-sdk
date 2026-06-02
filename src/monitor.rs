@@ -3,10 +3,7 @@
 //! The server binds to a configurable host:port and fans out JSON messages via
 //! a `tokio::sync::broadcast` channel. Zero overhead when no clients are connected.
 
-use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
 
 pub use crate::types::config::MonitorConfig;
 
@@ -130,74 +127,39 @@ pub enum MonitorEvent {
     Shadow(ShadowSummary),
 }
 
-/// Broadcasts monitor events to all connected WebSocket clients.
+/// Fans monitor events out to subscribers over a `tokio::broadcast` channel.
+///
+/// Channel-only by design: there is no standalone listener. The bot API
+/// (`tradectl-bot-api`) serves these frames to clients over its authed,
+/// TLS `wss://…/v1/stream` route — one port for the whole bot. A build with
+/// the `monitor` feature but no API server simply has no consumer, and
+/// [`broadcast`](Self::broadcast) becomes a no-op (no subscribers).
 pub struct MonitorBroadcaster {
     tx: broadcast::Sender<String>,
 }
 
+impl Default for MonitorBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MonitorBroadcaster {
-    /// Start the WS server and return a broadcaster handle.
-    pub async fn start(config: &MonitorConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let addr = format!("{}:{}", config.host, config.port);
-        let listener = TcpListener::bind(&addr).await?;
+    /// Create a broadcaster backed by a bounded (64) fan-out channel. No
+    /// socket is bound; consumers obtain receivers via
+    /// [`subscribe`](Self::subscribe).
+    pub fn new() -> Self {
         let (tx, _) = broadcast::channel::<String>(64);
-        let tx_clone = tx.clone();
-
-        tokio::spawn(async move {
-            loop {
-                let (stream, peer) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("[monitor] accept error: {}", e);
-                        continue;
-                    }
-                };
-                let mut rx = tx_clone.subscribe();
-                log::info!("[monitor] client connected: {}", peer);
-
-                tokio::spawn(async move {
-                    let ws = match tokio_tungstenite::accept_async(stream).await {
-                        Ok(ws) => ws,
-                        Err(e) => {
-                            log::warn!("[monitor] ws handshake error: {}", e);
-                            return;
-                        }
-                    };
-                    let (mut sink, mut stream) = ws.split();
-
-                    loop {
-                        tokio::select! {
-                            msg = rx.recv() => {
-                                match msg {
-                                    Ok(text) => {
-                                        if sink.send(Message::Text(text)).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        log::debug!("[monitor] client {} lagged {} messages", peer, n);
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                            ws_msg = stream.next() => {
-                                match ws_msg {
-                                    Some(Ok(Message::Close(_))) | None => break,
-                                    Some(Err(_)) => break,
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    log::info!("[monitor] client disconnected: {}", peer);
-                });
-            }
-        });
-
-        Ok(Self { tx })
+        Self { tx }
     }
 
-    /// Returns `true` if at least one monitor client is connected.
+    /// Subscribe a new receiver. Each connected `/v1/stream` client holds one;
+    /// dropping it decrements the count [`has_clients`](Self::has_clients) sees.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.tx.subscribe()
+    }
+
+    /// Returns `true` if at least one subscriber is connected.
     pub fn has_clients(&self) -> bool {
         self.tx.receiver_count() > 0
     }

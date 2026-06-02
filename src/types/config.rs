@@ -30,10 +30,44 @@ pub struct BotConfig {
     /// AI / LLM configuration (Telegram agent, on-demand explanations).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiConfig>,
+    /// Bot-side HTTP API (`tradectl-bot-api`) for the lab's HTTP transport.
+    /// Normally populated from `tradectl run --enable-api` CLI flags, which
+    /// override any value present in the config file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_api: Option<BotApiConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
 }
+
+/// Bot-side HTTP API settings (`tradectl-bot-api`, `:9103` by default).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotApiConfig {
+    /// Master switch. When false, the runner never starts the API server.
+    #[serde(default)]
+    pub enable: bool,
+    /// Listen port (default 9103).
+    #[serde(default = "default_bot_api_port")]
+    pub port: u16,
+    /// Bind address (default loopback). `0.0.0.0` exposes the bot to the
+    /// network and is gated behind an explicit `--enable-api` at the CLI.
+    #[serde(default = "default_bot_api_bind")]
+    pub bind: String,
+}
+
+impl Default for BotApiConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            port: default_bot_api_port(),
+            bind: default_bot_api_bind(),
+        }
+    }
+}
+
+fn default_bot_api_port() -> u16 { 9103 }
+fn default_bot_api_bind() -> String { "127.0.0.1".into() }
 
 impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
