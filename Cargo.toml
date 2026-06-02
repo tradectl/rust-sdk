@@ -6,7 +6,9 @@ description = "Crypto trading strategy SDK — types, traits, exchange abstracti
 
 [features]
 default = []
-monitor = ["tokio-tungstenite", "futures-util", "tokio/net", "tokio/rt", "tokio/macros"]
+# Channel-only now — the broadcaster needs just tokio's broadcast (sync). The
+# WS serving moved to tradectl-bot-api's `/v1/stream`, so no tungstenite here.
+monitor = ["tokio/sync"]
 runner = ["clap"]
 
 [dependencies]
@@ -16,8 +18,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time", "sync"] }
 log = "0.4"
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"], optional = true }
-futures-util = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
