@@ -92,6 +92,15 @@ pub struct TradeRow {
     pub mode: String,
     /// `"auto"` for strategy-driven trades, `"manual"` for human-placed.
     pub source: String,
+    /// Lowercased market type: "linear" | "inverse" | "spot". `""` for
+    /// legacy rows / bots predating the column (serde-default keeps old
+    /// bots' JSON decodable).
+    #[serde(default)]
+    pub market_type: String,
+    /// Lowercased exchange identity: "binance" | "bybit" | … `""` for
+    /// legacy rows / older bots.
+    #[serde(default)]
+    pub exchange: String,
 }
 
 /// Optional filters for [`TradeReader::list_trades`]. Empty-string / `None`
@@ -252,6 +261,8 @@ mod tests {
                 exit_order_id: "x".into(),
                 mode: "live".into(),
                 source: "auto".into(),
+                market_type: "linear".into(),
+                exchange: "binance".into(),
             }],
             next_cursor: Some("2:7".into()),
             total: 1,
