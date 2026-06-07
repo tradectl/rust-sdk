@@ -13,6 +13,10 @@ pub struct MonitorTick {
     pub timestamp_ms: u64,
     pub strategy_name: String,
     pub mode: String,
+    /// Market type the symbol trades on: `"linear" | "inverse" | "spot"`.
+    /// Lets consumers (native lab) pick the right public data feed instead of
+    /// guessing from the symbol shape (BNBUSDT is valid on spot *and* linear).
+    pub market: String,
     pub symbol: String,
     pub bid_price: f64,
     pub ask_price: f64,
