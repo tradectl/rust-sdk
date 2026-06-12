@@ -54,6 +54,17 @@ pub struct BotApiConfig {
     /// network and is gated behind an explicit `--enable-api` at the CLI.
     #[serde(default = "default_bot_api_bind")]
     pub bind: String,
+    /// Publish the pair blob to the platform / Telegram on startup (the
+    /// onboarding "publish ladder"). Defaults to `true`. Set `false` (or pass
+    /// `--no-publish`) to keep the manual paste flow with zero platform
+    /// involvement.
+    #[serde(default = "default_true")]
+    pub publish: bool,
+    /// Explicit routable host baked into the published blob (DNS name, NAT
+    /// front address, or IPv6 preference). Overrides the bind address and the
+    /// platform echo. Plumbed from `--public-host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_host: Option<String>,
 }
 
 impl Default for BotApiConfig {
@@ -62,6 +73,8 @@ impl Default for BotApiConfig {
             enable: false,
             port: default_bot_api_port(),
             bind: default_bot_api_bind(),
+            publish: true,
+            public_host: None,
         }
     }
 }
@@ -1192,6 +1205,33 @@ mod bot_config_name_tests {
         }"#;
         let cfg: BotConfig = serde_json::from_str(json).expect("parse");
         assert_eq!(cfg.name.as_deref(), Some("bncm03L"));
+    }
+}
+
+#[cfg(test)]
+mod bot_api_config_tests {
+    use super::BotApiConfig;
+
+    #[test]
+    fn publish_defaults_to_true_and_public_host_none() {
+        let cfg: BotApiConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(cfg.publish);
+        assert!(cfg.public_host.is_none());
+    }
+
+    #[test]
+    fn publish_false_and_public_host_camel_case() {
+        let cfg: BotApiConfig =
+            serde_json::from_str(r#"{"publish": false, "publicHost": "bot.example.com"}"#)
+                .unwrap();
+        assert!(!cfg.publish);
+        assert_eq!(cfg.public_host.as_deref(), Some("bot.example.com"));
+    }
+
+    #[test]
+    fn default_impl_publishes() {
+        assert!(BotApiConfig::default().publish);
+        assert!(BotApiConfig::default().public_host.is_none());
     }
 }
 
