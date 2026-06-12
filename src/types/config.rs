@@ -327,7 +327,9 @@ pub struct StratEntry {
     pub virtual_sl: bool,
     #[serde(default)]
     pub pairs: Vec<String>,
-    /// Send notifications (Telegram, etc.) for this strategy. Defaults to `true`.
+    /// Send per-trade notifications (entry fills, close summaries) for this
+    /// strategy. Defaults to `true`. System alerts, errors, and status
+    /// messages are always delivered regardless of this flag.
     #[serde(default = "default_true")]
     pub notify: bool,
     /// Strategy source: `"marketplace"` or `"local"` (default).
