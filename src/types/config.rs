@@ -30,44 +30,59 @@ pub struct BotConfig {
     /// AI / LLM configuration (Telegram agent, on-demand explanations).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiConfig>,
-    /// Bot-side HTTP API (`tradectl-bot-api`) for the lab's HTTP transport.
-    /// Normally populated from `tradectl run --enable-api` CLI flags, which
-    /// override any value present in the config file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bot_api: Option<BotApiConfig>,
+    /// Lab-facing API (`tradectl-bot-api`) the desktop Lab connects to.
+    /// Populated from the config file's `lab` block and/or the
+    /// `tradectl run --enable-api` CLI flags, which override config values.
+    /// `botApi` is accepted as a deprecated alias.
+    #[serde(default, alias = "botApi", skip_serializing_if = "Option::is_none")]
+    pub lab: Option<LabConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
 }
 
-/// Bot-side HTTP API settings (`tradectl-bot-api`, `:9103` by default).
+/// Lab-facing API settings (`tradectl-bot-api`, `:9103` by default) — the
+/// `lab` block in the bot config.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BotApiConfig {
+pub struct LabConfig {
     /// Master switch. When false, the runner never starts the API server.
     #[serde(default)]
     pub enable: bool,
     /// Listen port (default 9103).
-    #[serde(default = "default_bot_api_port")]
+    #[serde(default = "default_lab_port")]
     pub port: u16,
     /// Bind address (default loopback). `0.0.0.0` exposes the bot to the
-    /// network and is gated behind an explicit `--enable-api` at the CLI.
-    #[serde(default = "default_bot_api_bind")]
+    /// network so the Lab can reach it from another machine.
+    #[serde(default = "default_lab_bind")]
     pub bind: String,
+    /// Publish the pair blob to the platform / Telegram on startup (the
+    /// onboarding "publish ladder"). Defaults to `true`. Set `false` (or pass
+    /// `--no-publish`) to keep the manual paste flow with zero platform
+    /// involvement.
+    #[serde(default = "default_true")]
+    pub publish: bool,
+    /// Explicit routable host baked into the published blob (DNS name, NAT
+    /// front address, or IPv6 preference). Overrides the bind address and the
+    /// platform echo. Plumbed from `--public-host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_host: Option<String>,
 }
 
-impl Default for BotApiConfig {
+impl Default for LabConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            port: default_bot_api_port(),
-            bind: default_bot_api_bind(),
+            port: default_lab_port(),
+            bind: default_lab_bind(),
+            publish: true,
+            public_host: None,
         }
     }
 }
 
-fn default_bot_api_port() -> u16 { 9103 }
-fn default_bot_api_bind() -> String { "127.0.0.1".into() }
+fn default_lab_port() -> u16 { 9103 }
+fn default_lab_bind() -> String { "127.0.0.1".into() }
 
 impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
@@ -327,7 +342,9 @@ pub struct StratEntry {
     pub virtual_sl: bool,
     #[serde(default)]
     pub pairs: Vec<String>,
-    /// Send notifications (Telegram, etc.) for this strategy. Defaults to `true`.
+    /// Send per-trade notifications (entry fills, close summaries) for this
+    /// strategy. Defaults to `true`. System alerts, errors, and status
+    /// messages are always delivered regardless of this flag.
     #[serde(default = "default_true")]
     pub notify: bool,
     /// Strategy source: `"marketplace"` or `"local"` (default).
@@ -1190,6 +1207,47 @@ mod bot_config_name_tests {
         }"#;
         let cfg: BotConfig = serde_json::from_str(json).expect("parse");
         assert_eq!(cfg.name.as_deref(), Some("bncm03L"));
+    }
+}
+
+#[cfg(test)]
+mod lab_config_tests {
+    use super::{BotConfig, LabConfig};
+
+    #[test]
+    fn publish_defaults_to_true_and_public_host_none() {
+        let cfg: LabConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(cfg.publish);
+        assert!(cfg.public_host.is_none());
+    }
+
+    #[test]
+    fn publish_false_and_public_host_camel_case() {
+        let cfg: LabConfig =
+            serde_json::from_str(r#"{"publish": false, "publicHost": "bot.example.com"}"#)
+                .unwrap();
+        assert!(!cfg.publish);
+        assert_eq!(cfg.public_host.as_deref(), Some("bot.example.com"));
+    }
+
+    #[test]
+    fn default_impl_publishes() {
+        assert!(LabConfig::default().publish);
+        assert!(LabConfig::default().public_host.is_none());
+    }
+
+    #[test]
+    fn lab_key_parses_and_bot_api_alias_still_works() {
+        let base = r#"{"api":{"provider":"Binance"},"strats":[],"#;
+        let with_lab: BotConfig =
+            serde_json::from_str(&format!("{base}\"lab\":{{\"enable\":true,\"port\":9150}}}}"))
+                .unwrap();
+        assert_eq!(with_lab.lab.as_ref().unwrap().port, 9150);
+        // Deprecated `botApi` alias keeps old configs working.
+        let with_alias: BotConfig =
+            serde_json::from_str(&format!("{base}\"botApi\":{{\"enable\":true,\"port\":9151}}}}"))
+                .unwrap();
+        assert_eq!(with_alias.lab.as_ref().unwrap().port, 9151);
     }
 }
 

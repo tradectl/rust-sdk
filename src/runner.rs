@@ -54,6 +54,29 @@ static LOG_GUARDS: OnceCell<Mutex<Vec<WorkerGuard>>> = OnceCell::new();
 static JANITOR: OnceCell<crate::logging::LogJanitor> = OnceCell::new();
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
 
+/// Optional extra layer installed by callers (e.g. `tradectl-live` with
+/// `feature="api"`) before `setup_logging` runs. Consumed once by
+/// `init_inner`. Stored as a `Box<dyn Any>` so the SDK itself does not
+/// depend on concrete layer types — the caller downcasts it internally.
+///
+/// In practice the value is a
+/// `Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>`.
+static EXTRA_LAYER: Mutex<Option<Box<dyn Layer<Registry> + Send + Sync>>> =
+    Mutex::new(None);
+
+/// Register an additional tracing layer to be included in the subscriber
+/// built by the next `setup_logging` call. Must be called **before**
+/// `setup_logging` (i.e. before the runner's `LOG_INIT` guard fires).
+///
+/// Idempotent in the sense that a second call overwrites the previous layer
+/// (only one extra layer is supported). If `setup_logging` has already run,
+/// this is a no-op — the layer will not be installed.
+pub fn register_extra_layer(layer: Box<dyn Layer<Registry> + Send + Sync>) {
+    if let Ok(mut guard) = EXTRA_LAYER.lock() {
+        *guard = Some(layer);
+    }
+}
+
 /// Initialise structured logging with both stderr and file outputs.
 ///
 /// `name` is the per-bot identifier used in the log path:
@@ -152,6 +175,14 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
                     dir.display()
                 );
             }
+        }
+    }
+
+    // Consume any extra layer registered before setup_logging was called
+    // (e.g. the log-capture layer wired by tradectl-live's bot-api feature).
+    if let Ok(mut guard) = EXTRA_LAYER.lock() {
+        if let Some(extra) = guard.take() {
+            layers.push(extra);
         }
     }
 
