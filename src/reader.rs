@@ -216,6 +216,76 @@ pub trait StatusReader: Send + Sync {
     fn status_info(&self) -> StatusInfo;
 }
 
+/// Overall summary for a stats window. `win_rate` is a percentage in
+/// `0.0..=100.0`, computed from `wins / (wins + losses)` and guarded
+/// against division by zero (yields `0.0` when there are no decided trades).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsSummary {
+    pub trade_count: usize,
+    pub net_pnl_usd: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub win_rate: f64,
+}
+
+/// One day's aggregated P&L within a stats window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyStat {
+    /// `YYYY-MM-DD` (UTC) as produced by SQLite `date()`.
+    pub date: String,
+    pub pnl_usd: f64,
+    pub trade_count: usize,
+    pub wins: usize,
+}
+
+/// Per-symbol aggregated P&L within a stats window (daily rows rolled up to
+/// per-symbol totals for the whole window).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinStat {
+    pub symbol: String,
+    pub pnl_usd: f64,
+    pub trade_count: usize,
+    pub wins: usize,
+}
+
+/// Server-side, time-windowed trade statistics. The body of `GET /v1/stats`.
+/// Computed entirely in SQLite by the concrete backend — no row pulling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsResponse {
+    pub summary: StatsSummary,
+    pub daily: Vec<DailyStat>,
+    pub by_coin: Vec<CoinStat>,
+}
+
+impl Default for StatsResponse {
+    fn default() -> Self {
+        Self {
+            summary: StatsSummary {
+                trade_count: 0,
+                net_pnl_usd: 0.0,
+                wins: 0,
+                losses: 0,
+                win_rate: 0.0,
+            },
+            daily: Vec::new(),
+            by_coin: Vec::new(),
+        }
+    }
+}
+
+/// Read-only access to server-side aggregated trade statistics over a time
+/// window. Implemented in `tradectl-live` over the same `TradeDBReader` that
+/// backs [`TradeReader`]; the aggregation runs in SQLite. `mode` filters by
+/// `paper`/`live`; `None` aggregates across all modes (matching `/v1/trades`).
+pub trait StatsReader: Send + Sync {
+    fn stats(
+        &self,
+        from_ms: i64,
+        until_ms: i64,
+        mode: Option<&str>,
+    ) -> Result<StatsResponse, TradeReaderError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

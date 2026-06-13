@@ -14,8 +14,8 @@ mod run_cli;
 pub use types::*;
 pub use strategy::*;
 pub use reader::{
-    CloseReason, PositionReader, StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader,
-    TradeReaderError, TradeRow,
+    CloseReason, CoinStat, DailyStat, PositionReader, StatsReader, StatsResponse, StatsSummary,
+    StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader, TradeReaderError, TradeRow,
 };
 
 /// Entry point for self-contained strategy binaries.
