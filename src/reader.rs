@@ -277,12 +277,14 @@ impl Default for StatsResponse {
 /// window. Implemented in `tradectl-live` over the same `TradeDBReader` that
 /// backs [`TradeReader`]; the aggregation runs in SQLite. `mode` filters by
 /// `paper`/`live`; `None` aggregates across all modes (matching `/v1/trades`).
+/// `side` filters by trade direction (`LONG`/`SHORT`); `None` aggregates both.
 pub trait StatsReader: Send + Sync {
     fn stats(
         &self,
         from_ms: i64,
         until_ms: i64,
         mode: Option<&str>,
+        side: Option<&str>,
     ) -> Result<StatsResponse, TradeReaderError>;
 }
 
