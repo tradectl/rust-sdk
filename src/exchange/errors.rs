@@ -40,6 +40,9 @@ pub enum ApiErrorKind {
     MaxPositionExceeded,
     /// -4164: Order notional below exchange minimum.
     MinNotional,
+    /// -4198: Per-order amendment cap reached. The order can never be modified
+    /// again — the runner cancels it and places a fresh, amendable order.
+    ModifyLimitExceeded,
     /// Duplicate client order ID (order already placed with this ID).
     DuplicateOrderId,
     /// -1003: Too many requests (rate limit hit).
@@ -168,6 +171,13 @@ impl ExchangeApiError {
         )
     }
 
+    /// `-4198`: the per-order amendment cap was hit. Not retryable and not
+    /// fatal — the order is permanently un-amendable, so the runner cancels
+    /// it and re-places a fresh order (cancel + replace) rather than waiting.
+    pub fn is_modify_limit_exceeded(&self) -> bool {
+        self.kind == ApiErrorKind::ModifyLimitExceeded
+    }
+
     /// Errors that can be retried after a short delay.
     ///
     /// Note: `TooManyOrders` (-1015) is NOT retryable — it's a per-minute
@@ -193,6 +203,7 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -4005 => ApiErrorKind::QuantityExceeded,
         -2027 => ApiErrorKind::MaxPositionExceeded,
         -4164 => ApiErrorKind::MinNotional,
+        -4198 => ApiErrorKind::ModifyLimitExceeded,
         -1003 => ApiErrorKind::RateLimited,
         -1112 => ApiErrorKind::DuplicateOrderId,
         _ => {
@@ -347,6 +358,21 @@ mod tests {
         assert!(qty.is_persistent());
         assert!(!qty.is_recoverable());
         assert!(!qty.is_margin());
+    }
+
+    #[test]
+    fn parse_modify_limit_exceeded() {
+        let body = r#"{"code":-4198,"msg":"Exceed maximum modify order limit."}"#;
+        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order/amend".into());
+        assert_eq!(err.kind, ApiErrorKind::ModifyLimitExceeded);
+        assert!(err.is_modify_limit_exceeded());
+        // Cancel+replace is the only handling: it must not be silenced,
+        // retried, stopped (fatal/persistent), or paused (recoverable).
+        assert!(!err.is_silent());
+        assert!(!err.is_retryable());
+        assert!(!err.is_fatal());
+        assert!(!err.is_persistent());
+        assert!(!err.is_recoverable());
     }
 
     #[test]
