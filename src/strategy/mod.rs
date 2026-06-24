@@ -294,6 +294,19 @@ pub trait Strategy: Send {
     /// Reset session state for a symbol (or all if symbol is empty).
     /// Called by the runner when the Telegram `/session_reset` command is received.
     fn session_reset(&mut self, _symbol: &str) {}
+
+    /// Called when the runner cancels this symbol's resting entry order(s)
+    /// out-of-band — i.e. without the strategy having asked for it. The
+    /// canonical case is a latency / API-limit pause: the runner pulls all
+    /// resting entries from the exchange to ride out the pause, then expects
+    /// the strategy to re-establish them on resume.
+    ///
+    /// Strategies that track their pending entry internally (e.g. a "I already
+    /// have an order resting, so Hold" latch) MUST drop that state here, so the
+    /// next `on_ticker` re-derives a fresh order from the current book instead
+    /// of believing a now-cancelled order still rests. Strategies that hold no
+    /// such state can ignore this (the default is a no-op).
+    fn on_entries_canceled(&mut self, _symbol: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +337,11 @@ pub struct StrategyPlugin {
 }
 
 /// Current ABI version for strategy plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 5;
+///
+/// Bumped 5 → 6 for the `Strategy::on_entries_canceled` hook (resume-after-pause
+/// re-placement). Adding a trait method changes the `dyn Strategy` vtable, so all
+/// strategy plugins must be rebuilt against this version.
+pub const STRATEGY_ABI_VERSION: u32 = 6;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}

@@ -160,7 +160,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 3;
+pub const STRATEGY_ABI_VERSION: u32 = 6;
 
 #[repr(C)]
 pub struct StrategyPlugin {
