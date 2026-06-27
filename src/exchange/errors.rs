@@ -106,9 +106,25 @@ impl ExchangeApiError {
         }
     }
 
-    /// Fatal errors that should stop all trading immediately.
+    /// Fatal errors that should stop trading. Use `is_account_fatal()` /
+    /// `is_symbol_fatal()` to decide the *scope* of the stop — the bot vs a
+    /// single symbol.
     pub fn is_fatal(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::Unauthorized | ApiErrorKind::SymbolNotTrading)
+        self.is_account_fatal() || self.is_symbol_fatal()
+    }
+
+    /// Account-level fatal: the whole account cannot trade, so the entire bot
+    /// (every strategy and symbol) must stop. Only invalid credentials / IP
+    /// qualify — there is no per-symbol recovery from these.
+    pub fn is_account_fatal(&self) -> bool {
+        matches!(self.kind, ApiErrorKind::Unauthorized)
+    }
+
+    /// Symbol-level fatal: the affected symbol is halted/delisted (`-4199`),
+    /// but the account and every sibling symbol are unaffected. The runner
+    /// stops only that symbol's task — it must NOT broadcast a global shutdown.
+    pub fn is_symbol_fatal(&self) -> bool {
+        matches!(self.kind, ApiErrorKind::SymbolNotTrading)
     }
 
     /// Human-readable reason for fatal errors.
@@ -263,6 +279,33 @@ mod tests {
         assert_eq!(err.kind, ApiErrorKind::Unauthorized);
         assert!(err.is_fatal());
         assert_eq!(err.fatal_reason(), Some("invalid API key or IP not whitelisted"));
+    }
+
+    #[test]
+    fn unauthorized_is_account_fatal_not_symbol_fatal() {
+        let err = ExchangeApiError::from_response(
+            403,
+            r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"#,
+            "POST /fapi/v1/order".into(),
+        );
+        assert_eq!(err.kind, ApiErrorKind::Unauthorized);
+        assert!(err.is_fatal());
+        assert!(err.is_account_fatal(), "bad key/IP must stop the whole bot");
+        assert!(!err.is_symbol_fatal());
+    }
+
+    #[test]
+    fn symbol_not_trading_is_symbol_fatal_not_account_fatal() {
+        let err = ExchangeApiError::from_response(
+            400,
+            r#"{"code":-4199,"msg":"Symbol is not in trading status."}"#,
+            "POST /fapi/v1/order".into(),
+        );
+        assert_eq!(err.kind, ApiErrorKind::SymbolNotTrading);
+        assert!(err.is_fatal());
+        assert!(err.is_symbol_fatal(), "a halted symbol must stop only that symbol");
+        assert!(!err.is_account_fatal(), "a halted symbol must NOT stop the whole bot");
+        assert_eq!(err.fatal_reason(), Some("symbol not in trading status"));
     }
 
     #[test]
