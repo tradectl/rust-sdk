@@ -50,7 +50,7 @@ impl CloseReason {
             "sl" => Self::Sl,
             "manual" => Self::Manual,
             "forceclose" | "force_close" | "force-close" => Self::ForceClose,
-            "liquidated" | "liquidation" => Self::Liquidated,
+            "liquidated" | "liquidation" | "adl" => Self::Liquidated,
             "canceled" | "cancelled" => Self::Canceled,
             _ => Self::Unknown,
         }
@@ -299,6 +299,7 @@ mod tests {
         assert_eq!(CloseReason::from_raw("force_close"), CloseReason::ForceClose);
         assert_eq!(CloseReason::from_raw("force-close"), CloseReason::ForceClose);
         assert_eq!(CloseReason::from_raw("liquidation"), CloseReason::Liquidated);
+        assert_eq!(CloseReason::from_raw("ADL"), CloseReason::Liquidated);
         assert_eq!(CloseReason::from_raw("cancelled"), CloseReason::Canceled);
         assert_eq!(CloseReason::from_raw("???"), CloseReason::Unknown);
     }
