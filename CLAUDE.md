@@ -78,6 +78,20 @@ pub struct StrategyContext<'a> {
     pub trade_count: usize,                   // closed trades count
     pub direction: Side,                      // Long or Short (from config)
     pub max_orders_reached: bool,             // exchange order limit hit
+    pub can_enter: bool,                      // runner will accept a fresh PlaceEntry now
+    pub entry_orders: &'a [EntryOrder],       // this symbol's live entry orders (runner-tracked)
+}
+```
+
+`entry_orders` is the source of truth for "do I already have an entry resting, and at what price." Strategies read it each tick instead of caching a pending-entry latch (which silently desyncs when the runner cancels an entry out-of-band). Single-entry strategies read `entry_orders.first()`; multi-slot strategies match on `EntryOrder::slot`.
+
+```rust
+pub struct EntryOrder {
+    pub slot: Option<String>,    // entry_id the strategy assigned (None = single-entry)
+    pub side: Side,
+    pub price: f64,              // resting limit price
+    pub size: f64,              // original quantity
+    pub filled: f64,            // cumulative filled (0.0 until a partial fill)
 }
 ```
 
@@ -160,7 +174,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 6;
+pub const STRATEGY_ABI_VERSION: u32 = 7;
 
 #[repr(C)]
 pub struct StrategyPlugin {

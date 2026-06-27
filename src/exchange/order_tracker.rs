@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use crate::types::Order;
-use crate::strategy::ExitOrder;
+use crate::types::enums::{OrderSide, OrderStatus, Side};
+use crate::strategy::{ExitOrder, EntryOrder};
 
 pub type OrderEventCallback = Box<dyn Fn(&Order) + Send + Sync>;
 
@@ -194,6 +195,51 @@ impl OrderTracker {
             .collect()
     }
 
+    /// The **live** (still-resting) entry orders for one symbol, projected into
+    /// the strategy-facing `EntryOrder` shape exposed via
+    /// `StrategyContext::entry_orders`.
+    ///
+    /// The tracker is shared across every symbol a strategy trades, so the
+    /// `symbol` filter is what scopes the result to a single coin — this is what
+    /// lets a per-symbol live task and a multi-symbol replay instance both see
+    /// only the relevant coin's entries.
+    ///
+    /// Only orders with resting quantity (`New` / `PartiallyFilled`) are
+    /// returned. A filled entry can briefly linger in the tracker between its
+    /// fill and the runner's `remove_entry`; excluding it by status keeps "live"
+    /// literally true, so a chasing strategy never tries to chase an order that
+    /// has already filled. The `price`/`filled` reflect the *current* resting
+    /// order (post-edit), which is what a chasing strategy should compare
+    /// against. The `"_"` single-entry slot sentinel maps back to `None` so the
+    /// strategy sees the same `entry_id` it placed with.
+    pub fn entry_orders_for_symbol(&self, symbol: &str) -> Vec<EntryOrder> {
+        let Some(sm) = self.orders.get(symbol) else { return Vec::new() };
+        self.entry_metadata.iter()
+            .filter_map(|(cid, meta)| {
+                let order = sm.get(cid)?;
+                if !matches!(order.status, OrderStatus::New | OrderStatus::PartiallyFilled) {
+                    return None;
+                }
+                Some(EntryOrder {
+                    slot: meta.slot.as_deref().filter(|s| *s != "_").map(str::to_string),
+                    side: match order.side {
+                        OrderSide::Buy => Side::Long,
+                        OrderSide::Sell => Side::Short,
+                    },
+                    // `meta.entry_price` is the runner's canonical current resting
+                    // price: it is set at placement and updated to the new price on
+                    // every chase-edit (the same field the edit-dedup reads). The
+                    // raw `Order.price` is frozen at placement and goes stale after
+                    // the first edit, so a chasing strategy reading it would re-chase
+                    // every tick.
+                    price: meta.entry_price,
+                    size: order.quantity,
+                    filled: order.filled_quantity,
+                })
+            })
+            .collect()
+    }
+
     // ── Event Callbacks ──────────────────────────────────────────
 
     pub fn on_fill(&mut self, cb: OrderEventCallback) {
@@ -332,6 +378,56 @@ mod tests {
         let got = tracker.get_entry_metadata("CLIENT-1").expect("metadata present");
         assert_eq!(got.slot.as_deref(), Some("_"));
         assert_eq!(got.entry_price, 50000.0);
+    }
+
+    #[test]
+    fn entry_orders_for_symbol_projects_live_entries() {
+        let mut tracker = OrderTracker::new();
+
+        // Single-entry slot "_" → projected slot None. The projected price comes
+        // from `meta.entry_price` (the field the runner keeps current across
+        // chase-edits), NOT the frozen `Order.price` — set them to *different*
+        // values so this test fails if the projection ever reads the wrong one.
+        let mut o1 = make_order("BTCUSDT", "ORD-1", Some("C1"));
+        o1.price = 999.0; // stale placement price — must NOT be what we read
+        o1.quantity = 2.0;
+        o1.filled_quantity = 0.5;
+        tracker.track_entry(o1, EntryMetadata { slot: Some("_".into()), entry_price: 100.0, ..Default::default() });
+
+        // Named slot on the same symbol, short side → Sell maps to Side::Short.
+        let mut o2 = make_order("BTCUSDT", "ORD-2", Some("C2"));
+        o2.side = OrderSide::Sell;
+        o2.price = 999.0; // stale placement price
+        tracker.track_entry(o2, EntryMetadata { slot: Some("a".into()), entry_price: 200.0, ..Default::default() });
+
+        // A filled-but-not-yet-removed entry must be excluded — "live" means
+        // still resting, so a chasing strategy never chases a filled order.
+        let mut o_filled = make_order("BTCUSDT", "ORD-4", Some("C4"));
+        o_filled.status = OrderStatus::Filled;
+        tracker.track_entry(o_filled, EntryMetadata { slot: Some("b".into()), ..Default::default() });
+
+        // Different symbol must not leak into BTCUSDT's projection.
+        tracker.track_entry(
+            make_order("ETHUSDT", "ORD-3", Some("C3")),
+            EntryMetadata { slot: Some("_".into()), ..Default::default() },
+        );
+
+        let mut got = tracker.entry_orders_for_symbol("BTCUSDT");
+        got.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
+        assert_eq!(got.len(), 2);
+
+        assert_eq!(got[0].slot, None, "single-entry \"_\" sentinel maps back to None");
+        assert_eq!(got[0].side, Side::Long, "Buy → Long");
+        assert_eq!(got[0].price, 100.0);
+        assert_eq!(got[0].size, 2.0);
+        assert_eq!(got[0].filled, 0.5);
+
+        assert_eq!(got[1].slot.as_deref(), Some("a"), "named slot preserved");
+        assert_eq!(got[1].side, Side::Short, "Sell → Short");
+        assert_eq!(got[1].price, 200.0);
+
+        assert_eq!(tracker.entry_orders_for_symbol("ETHUSDT").len(), 1, "symbol isolation");
+        assert!(tracker.entry_orders_for_symbol("XRPUSDT").is_empty(), "no entries → empty");
     }
 
     #[test]

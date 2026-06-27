@@ -45,6 +45,30 @@ pub struct ExitOrder {
     pub delay_ms: u64,
 }
 
+/// An entry order the strategy currently has live on the exchange for a symbol,
+/// as seen through `StrategyContext::entry_orders`.
+///
+/// The runner is the source of truth for what entry orders exist — it tracks
+/// them in its order tracker. Strategies read these each tick instead of
+/// caching their own "do I already have an entry resting" state, which can
+/// silently desync when the runner cancels an entry out-of-band (a gate pause,
+/// rotation, etc.). With no cached copy there is nothing to desync.
+#[derive(Debug, Clone)]
+pub struct EntryOrder {
+    /// The `entry_id` the strategy assigned when it placed this order.
+    /// `None` for single-entry mode (the implicit slot).
+    pub slot: Option<String>,
+    /// Order side.
+    pub side: Side,
+    /// Limit price of the resting order.
+    pub price: f64,
+    /// Original order quantity.
+    pub size: f64,
+    /// Cumulative filled quantity. `0.0` until a (partial) fill arrives, letting
+    /// partial-fill-aware strategies react without tracking it themselves.
+    pub filled: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Action enum
 // ---------------------------------------------------------------------------
@@ -168,6 +192,14 @@ pub struct StrategyContext<'a> {
     /// one when `can_enter == false` is a strategy bug; the runner drops the
     /// action and logs a warning.
     pub can_enter: bool,
+    /// The entry orders this strategy currently has live on the exchange for
+    /// this symbol, as tracked by the runner. Read these to decide whether to
+    /// place a fresh entry or adjust an existing one — do **not** cache an
+    /// "I have an entry resting" flag in the strategy, or it will desync when
+    /// the runner cancels an entry out-of-band (gate pause, rotation, etc.).
+    /// Empty when no entry orders are live. Single-entry strategies read
+    /// `entry_orders.first()`; multi-slot strategies match on `EntryOrder::slot`.
+    pub entry_orders: &'a [EntryOrder],
 }
 
 // ---------------------------------------------------------------------------
@@ -294,19 +326,6 @@ pub trait Strategy: Send {
     /// Reset session state for a symbol (or all if symbol is empty).
     /// Called by the runner when the Telegram `/session_reset` command is received.
     fn session_reset(&mut self, _symbol: &str) {}
-
-    /// Called when the runner cancels this symbol's resting entry order(s)
-    /// out-of-band — i.e. without the strategy having asked for it. The
-    /// canonical case is a latency / API-limit pause: the runner pulls all
-    /// resting entries from the exchange to ride out the pause, then expects
-    /// the strategy to re-establish them on resume.
-    ///
-    /// Strategies that track their pending entry internally (e.g. a "I already
-    /// have an order resting, so Hold" latch) MUST drop that state here, so the
-    /// next `on_ticker` re-derives a fresh order from the current book instead
-    /// of believing a now-cancelled order still rests. Strategies that hold no
-    /// such state can ignore this (the default is a no-op).
-    fn on_entries_canceled(&mut self, _symbol: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -338,10 +357,11 @@ pub struct StrategyPlugin {
 
 /// Current ABI version for strategy plugins.
 ///
-/// Bumped 5 → 6 for the `Strategy::on_entries_canceled` hook (resume-after-pause
-/// re-placement). Adding a trait method changes the `dyn Strategy` vtable, so all
-/// strategy plugins must be rebuilt against this version.
-pub const STRATEGY_ABI_VERSION: u32 = 6;
+/// Bumped 6 → 7: removed the `Strategy::on_entries_canceled` hook and added
+/// `StrategyContext::entry_orders` so strategies read their live entry orders
+/// from the runner instead of caching (and desyncing) their own pending-entry
+/// state. Changing the trait/context layout requires rebuilding all plugins.
+pub const STRATEGY_ABI_VERSION: u32 = 7;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
