@@ -107,6 +107,10 @@ pub struct BotMeta {
     pub symbols: Vec<String>,
     pub mode: String,
     pub provider: String,
+    /// The bot's market, as a watchdog-style string (`"binance-coinm"` /
+    /// `"binance-usdm"` / `"<provider>-<markettype>"`). Lets a watchdog learn
+    /// which account it guards from the bot itself. Empty if unknown.
+    pub market: String,
     pub balance: f64,
     pub uptime_secs: u64,
     pub started_at_ms: u64,
@@ -120,6 +124,7 @@ impl Default for BotMeta {
             symbols: Vec::new(),
             mode: String::new(),
             provider: String::new(),
+            market: String::new(),
             balance: 0.0,
             uptime_secs: 0,
             started_at_ms: 0,

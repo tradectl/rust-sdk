@@ -201,6 +201,10 @@ pub struct StatusInfo {
     pub version: String,
     pub mode: String,
     pub exchange: String,
+    /// The bot's market (`"binance-coinm"` / `"binance-usdm"` / …), so a
+    /// watchdog can learn which account it guards from the bot. Empty if
+    /// unknown (older bot).
+    pub market: String,
     pub uptime_secs: u64,
     pub symbol_count: u32,
     pub position_count: u32,
