@@ -277,6 +277,29 @@ impl TelegramConfig {
     pub fn is_disabled(&self) -> bool {
         !self.enable
     }
+
+    /// Reject a half-configured direct block: exactly one of `bot_token` /
+    /// `chat_id` present is almost always a typo, and — critically — it would
+    /// otherwise fall through `is_legacy()` and route the user's own fill/P&L
+    /// text through the shared platform relay silently (a privacy surprise).
+    /// A disabled block skips the check (it sends nothing either way).
+    /// Returns the loud startup error to fail fast on, restoring the
+    /// pre-platform behavior where both fields were required.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.is_disabled() {
+            return Ok(());
+        }
+        let has_token = self.bot_token.as_deref().is_some_and(|t| !t.is_empty());
+        let has_chat = self.chat_id.as_deref().is_some_and(|c| !c.is_empty());
+        if has_token != has_chat {
+            return Err(
+                "telegram config sets only one of bot_token / chat_id — set BOTH for your own \
+                 bot (direct mode), or NEITHER to use the shared platform relay"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Exchange API credentials.
@@ -1425,6 +1448,36 @@ mod telegram_config_tests {
         }"#;
         let cfg: BotConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.telegram.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_partial_legacy_block() {
+        // token without chat, and chat without token, must both fail fast —
+        // otherwise the user's own fill/P&L text silently reroutes through the
+        // platform relay.
+        let token_only: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A"}"#).unwrap();
+        assert!(token_only.validate().is_err());
+        let chat_only: TelegramConfig = serde_json::from_str(r#"{"chat_id":"9"}"#).unwrap();
+        assert!(chat_only.validate().is_err());
+        // empty-string counts as absent.
+        let empty_chat: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A","chat_id":""}"#).unwrap();
+        assert!(empty_chat.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_complete_and_platform_and_disabled() {
+        // Both present (direct), neither present (platform), and disabled all pass.
+        let direct: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A","chat_id":"9"}"#).unwrap();
+        assert!(direct.validate().is_ok());
+        let platform: TelegramConfig = serde_json::from_str(r#"{"enable":true}"#).unwrap();
+        assert!(platform.validate().is_ok());
+        // A disabled block is exempt even if half-filled — it sends nothing.
+        let disabled_partial: TelegramConfig =
+            serde_json::from_str(r#"{"enable":false,"bot_token":"1:A"}"#).unwrap();
+        assert!(disabled_partial.validate().is_ok());
     }
 }
 
