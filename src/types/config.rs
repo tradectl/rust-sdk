@@ -67,6 +67,12 @@ pub struct LabConfig {
     /// platform echo. Plumbed from `--public-host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_host: Option<String>,
+    /// Write access for the Lab settings surface (`/v1/config*`).
+    /// `"full"` (default — possession of the pair blob means you own the
+    /// bot) or `"read_only"` (view-only lab: the settings routes answer 404
+    /// and nothing can be changed remotely).
+    #[serde(default = "default_lab_control")]
+    pub control: String,
 }
 
 impl Default for LabConfig {
@@ -77,12 +83,14 @@ impl Default for LabConfig {
             bind: default_lab_bind(),
             publish: true,
             public_host: None,
+            control: default_lab_control(),
         }
     }
 }
 
 fn default_lab_port() -> u16 { 9103 }
 fn default_lab_bind() -> String { "127.0.0.1".into() }
+fn default_lab_control() -> String { "full".into() }
 
 impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
