@@ -17,6 +17,10 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
+    /// Defaultable so a partial paste (e.g. a strats-only document merged
+    /// via the Lab's setup panel) parses; an absent block means "no
+    /// credentials yet" (provider Binance, empty keys) — awaiting-setup.
+    #[serde(default)]
     pub api: ApiConfig,
     pub limits: Option<LimitsConfig>,
     pub db: Option<DbConfig>,
