@@ -345,11 +345,16 @@ pub struct ApiConfig {
     /// max leverage below the account's cached value. Default: false.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
-    /// Force hedge mode (dual-side position) on the exchange. When enabled,
-    /// every order includes `positionSide=LONG/SHORT`. Also auto-detected
-    /// when strategies with opposite directions share a symbol.
+    /// Force hedge mode (dual-side position) on the exchange. `None` (the
+    /// default — omit the key) means "leave it alone": the adapter detects
+    /// and uses whatever mode the account is already in, without ever
+    /// trying to switch it. `Some(true/false)` forces that mode at startup,
+    /// which the exchange refuses if the account has any order or position
+    /// open (Binance -4067) — the account-wide mode can't change while
+    /// anything is resting. When enabled, every order includes
+    /// `positionSide=LONG/SHORT`.
     #[serde(default)]
-    pub hedge_mode: bool,
+    pub hedge_mode: Option<bool>,
 }
 
 impl Default for ApiConfig {
@@ -363,7 +368,7 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             auto_adjust_leverage: false,
-            hedge_mode: false,
+            hedge_mode: None,
         }
     }
 }

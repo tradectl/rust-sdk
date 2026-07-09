@@ -138,4 +138,16 @@ pub trait MarketAdapter: Send + Sync {
     // ── Logging context ──────────────────────────────────────────
     /// Override the log prefix (e.g. strategy name). Default no-op.
     fn set_log_prefix(&self, _prefix: &str) {}
+
+    // ── Position mode ─────────────────────────────────────────────
+    /// The hedge/dual-side-position mode actually in effect after
+    /// `init()` — resolved from the exchange when the config left it
+    /// unset (`ApiConfig.hedge_mode: None`), or the enforced value when
+    /// explicitly configured. Only exchanges with a toggleable
+    /// account-wide position mode (currently Binance) need to override
+    /// this; others don't use `positionSide` on orders, so `false` is
+    /// always correct for them.
+    fn resolved_hedge_mode(&self) -> bool {
+        false
+    }
 }
