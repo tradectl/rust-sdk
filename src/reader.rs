@@ -101,6 +101,11 @@ pub struct TradeRow {
     /// legacy rows / older bots.
     #[serde(default)]
     pub exchange: String,
+    /// Config-version id (`cfg-…`) active when the trade closed — ties the
+    /// trade to the exact config that produced it. `""` for legacy rows /
+    /// bots predating config versioning.
+    #[serde(default)]
+    pub config_version: String,
 }
 
 /// Optional filters for [`TradeReader::list_trades`]. Empty-string / `None`
@@ -340,6 +345,7 @@ mod tests {
                 source: "auto".into(),
                 market_type: "linear".into(),
                 exchange: "binance".into(),
+                config_version: "cfg-test".into(),
             }],
             next_cursor: Some("2:7".into()),
             total: 1,
