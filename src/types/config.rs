@@ -17,6 +17,10 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
+    /// Defaultable so a partial paste (e.g. a strats-only document merged
+    /// via the Lab's setup panel) parses; an absent block means "no
+    /// credentials yet" (provider Binance, empty keys) — awaiting-setup.
+    #[serde(default)]
     pub api: ApiConfig,
     pub limits: Option<LimitsConfig>,
     pub db: Option<DbConfig>,
@@ -67,6 +71,12 @@ pub struct LabConfig {
     /// platform echo. Plumbed from `--public-host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_host: Option<String>,
+    /// Write access for the Lab settings surface (`/v1/config*`).
+    /// `"full"` (default — possession of the pair blob means you own the
+    /// bot) or `"read_only"` (view-only lab: the settings routes answer 404
+    /// and nothing can be changed remotely).
+    #[serde(default = "default_lab_control")]
+    pub control: String,
 }
 
 impl Default for LabConfig {
@@ -77,12 +87,14 @@ impl Default for LabConfig {
             bind: default_lab_bind(),
             publish: true,
             public_host: None,
+            control: default_lab_control(),
         }
     }
 }
 
 fn default_lab_port() -> u16 { 9103 }
 fn default_lab_bind() -> String { "127.0.0.1".into() }
+fn default_lab_control() -> String { "full".into() }
 
 impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
@@ -204,15 +216,103 @@ fn default_monitor_host() -> String { "0.0.0.0".into() }
 fn default_monitor_port() -> u16 { 9100 }
 
 /// Telegram notification settings.
+///
+/// The block is intentionally shape-tolerant so a single `telegram` key can
+/// carry three modes with no breaking change to existing configs:
+///
+/// - **Legacy / direct** — `{"botToken": "...", "chatId": "..."}`: the bot
+///   owns its own BotFather token and talks to Telegram directly. This is
+///   exactly the pre-platform behavior; existing configs parse unchanged.
+/// - **Off** — `{"enable": false}`: no Telegram at all (the key is `enable`,
+///   the house convention, not `enabled`).
+/// - **Platform** — the key is absent entirely, OR `{"enable": true}` with no
+///   token: the runner defaults to the shared @rs_tradectl_bot relay when the
+///   account is linked (see `docs/telegram.md`). Absence is handled at the
+///   `BotConfig.telegram: Option<_>` level; this struct covers the explicit
+///   `{"enable": true}` opt-in.
+///
+/// All fields are optional with sensible defaults so every shape above
+/// deserializes. Which mode applies is decided by the runner from
+/// [`TelegramConfig::is_legacy`] / [`TelegramConfig::is_disabled`].
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TelegramConfig {
-    pub bot_token: String,
-    pub chat_id: String,
+    /// BotFather token (legacy/direct mode only). Absent in platform mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    /// Target chat id (legacy/direct mode only). Absent in platform mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     #[serde(default = "default_send_interval")]
     pub send_interval: u64,
+    /// Master switch. Defaults to `true` so legacy configs (which never set it)
+    /// keep working; set `{"enable": false}` to turn Telegram off entirely.
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    /// Which inbound commands the bot will relay. Defaults to `all` — Telegram
+    /// control is the product. Paranoid operators set `read-only` (only
+    /// state-reading commands are honored) or `none` (no command polling).
+    #[serde(default)]
+    pub commands: TelegramCommands,
 }
 
 fn default_send_interval() -> u64 { 10 }
+
+/// Inbound-command authorization gate for the Telegram channel.
+///
+/// A bot-side mitigation for the platform trust surface (a compromised
+/// platform could otherwise inject `/stop`, `/promote_approve`, … into the
+/// command queue). `all` is the default because Telegram control is the whole
+/// point of the feature; `read-only` keeps state-changing commands on the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TelegramCommands {
+    /// Every command, plus the AI free-text fallback (under the `ai` feature).
+    #[default]
+    All,
+    /// Only state-reading commands (`/status`, `/profit`, …). State-changing
+    /// commands (`/stop`, `/promote_*`, `/session_reset`, `/resume`,
+    /// `/demote`, AI free-text) are refused.
+    ReadOnly,
+    /// No command polling at all.
+    None,
+}
+
+impl TelegramConfig {
+    /// True when this is a legacy/direct block carrying its own token+chat.
+    /// Explicit legacy config always beats the platform default.
+    pub fn is_legacy(&self) -> bool {
+        self.bot_token.as_deref().is_some_and(|t| !t.is_empty())
+            && self.chat_id.as_deref().is_some_and(|c| !c.is_empty())
+    }
+
+    /// True when the operator turned Telegram off with `{"enable": false}`.
+    pub fn is_disabled(&self) -> bool {
+        !self.enable
+    }
+
+    /// Reject a half-configured direct block: exactly one of `bot_token` /
+    /// `chat_id` present is almost always a typo, and — critically — it would
+    /// otherwise fall through `is_legacy()` and route the user's own fill/P&L
+    /// text through the shared platform relay silently (a privacy surprise).
+    /// A disabled block skips the check (it sends nothing either way).
+    /// Returns the loud startup error to fail fast on, restoring the
+    /// pre-platform behavior where both fields were required.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.is_disabled() {
+            return Ok(());
+        }
+        let has_token = self.bot_token.as_deref().is_some_and(|t| !t.is_empty());
+        let has_chat = self.chat_id.as_deref().is_some_and(|c| !c.is_empty());
+        if has_token != has_chat {
+            return Err(
+                "telegram config sets only one of bot_token / chat_id — set BOTH for your own \
+                 bot (direct mode), or NEITHER to use the shared platform relay"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Exchange API credentials.
 ///
@@ -245,11 +345,16 @@ pub struct ApiConfig {
     /// max leverage below the account's cached value. Default: false.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
-    /// Force hedge mode (dual-side position) on the exchange. When enabled,
-    /// every order includes `positionSide=LONG/SHORT`. Also auto-detected
-    /// when strategies with opposite directions share a symbol.
+    /// Force hedge mode (dual-side position) on the exchange. `None` (the
+    /// default — omit the key) means "leave it alone": the adapter detects
+    /// and uses whatever mode the account is already in, without ever
+    /// trying to switch it. `Some(true/false)` forces that mode at startup,
+    /// which the exchange refuses if the account has any order or position
+    /// open (Binance -4067) — the account-wide mode can't change while
+    /// anything is resting. When enabled, every order includes
+    /// `positionSide=LONG/SHORT`.
     #[serde(default)]
-    pub hedge_mode: bool,
+    pub hedge_mode: Option<bool>,
 }
 
 impl Default for ApiConfig {
@@ -263,7 +368,7 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             auto_adjust_leverage: false,
-            hedge_mode: false,
+            hedge_mode: None,
         }
     }
 }
@@ -1248,6 +1353,148 @@ mod lab_config_tests {
             serde_json::from_str(&format!("{base}\"botApi\":{{\"enable\":true,\"port\":9151}}}}"))
                 .unwrap();
         assert_eq!(with_alias.lab.as_ref().unwrap().port, 9151);
+    }
+}
+
+#[cfg(test)]
+mod telegram_config_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_block_parses_unchanged() {
+        // A pre-platform config must parse exactly as before and be treated as
+        // legacy/direct mode. TelegramConfig has no rename_all, so its wire
+        // keys are snake_case (bot_token / chat_id / send_interval).
+        let cfg: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"123:ABC","chat_id":"999","send_interval":5}"#)
+                .unwrap();
+        assert_eq!(cfg.bot_token.as_deref(), Some("123:ABC"));
+        assert_eq!(cfg.chat_id.as_deref(), Some("999"));
+        assert_eq!(cfg.send_interval, 5);
+        assert!(cfg.enable, "enable defaults to true for legacy configs");
+        assert_eq!(cfg.commands, TelegramCommands::All);
+        assert!(cfg.is_legacy());
+        assert!(!cfg.is_disabled());
+    }
+
+    #[test]
+    fn legacy_block_without_send_interval_uses_default() {
+        let cfg: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"t","chat_id":"c"}"#).unwrap();
+        assert_eq!(cfg.send_interval, 10);
+        assert!(cfg.is_legacy());
+    }
+
+    #[test]
+    fn enable_false_toggle_is_disabled() {
+        // The house convention key is `enable`, not `enabled`.
+        let cfg: TelegramConfig = serde_json::from_str(r#"{"enable":false}"#).unwrap();
+        assert!(cfg.is_disabled());
+        assert!(!cfg.is_legacy(), "no token → not legacy");
+        assert!(cfg.bot_token.is_none());
+    }
+
+    #[test]
+    fn enable_true_no_token_is_platform_optin() {
+        // Explicit opt-in to platform mode: enabled but no own token.
+        let cfg: TelegramConfig = serde_json::from_str(r#"{"enable":true}"#).unwrap();
+        assert!(!cfg.is_disabled());
+        assert!(!cfg.is_legacy());
+    }
+
+    #[test]
+    fn commands_parses_all_variants() {
+        let all: TelegramConfig = serde_json::from_str(r#"{"commands":"all"}"#).unwrap();
+        assert_eq!(all.commands, TelegramCommands::All);
+        let ro: TelegramConfig = serde_json::from_str(r#"{"commands":"read-only"}"#).unwrap();
+        assert_eq!(ro.commands, TelegramCommands::ReadOnly);
+        let none: TelegramConfig = serde_json::from_str(r#"{"commands":"none"}"#).unwrap();
+        assert_eq!(none.commands, TelegramCommands::None);
+    }
+
+    #[test]
+    fn commands_defaults_to_all_when_absent() {
+        let cfg: TelegramConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(cfg.commands, TelegramCommands::All);
+        assert!(cfg.enable, "empty object → enabled by default");
+    }
+
+    #[test]
+    fn round_trips_all_three_shapes() {
+        for src in [
+            r#"{"bot_token":"t","chat_id":"c","send_interval":7,"commands":"read-only"}"#,
+            r#"{"enable":false}"#,
+            r#"{"enable":true,"commands":"none"}"#,
+        ] {
+            let cfg: TelegramConfig = serde_json::from_str(src).unwrap();
+            let out = serde_json::to_string(&cfg).unwrap();
+            let back: TelegramConfig = serde_json::from_str(&out).unwrap();
+            assert_eq!(back.bot_token, cfg.bot_token);
+            assert_eq!(back.chat_id, cfg.chat_id);
+            assert_eq!(back.send_interval, cfg.send_interval);
+            assert_eq!(back.enable, cfg.enable);
+            assert_eq!(back.commands, cfg.commands);
+        }
+    }
+
+    #[test]
+    fn platform_shape_omits_token_fields_on_serialize() {
+        let cfg: TelegramConfig = serde_json::from_str(r#"{"enable":true}"#).unwrap();
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(!out.contains("bot_token"), "platform shape must not emit bot_token: {out}");
+        assert!(!out.contains("chat_id"), "platform shape must not emit chat_id: {out}");
+    }
+
+    #[test]
+    fn bot_config_with_legacy_telegram_parses() {
+        let json = r#"{
+            "telegram": { "bot_token": "t", "chat_id": "c" },
+            "api": { "provider": "Binance", "key": "k", "secret": "s" },
+            "strats": []
+        }"#;
+        let cfg: BotConfig = serde_json::from_str(json).unwrap();
+        let tg = cfg.telegram.unwrap();
+        assert!(tg.is_legacy());
+    }
+
+    #[test]
+    fn bot_config_without_telegram_is_none() {
+        let json = r#"{
+            "api": { "provider": "Binance", "key": "k", "secret": "s" },
+            "strats": []
+        }"#;
+        let cfg: BotConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.telegram.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_partial_legacy_block() {
+        // token without chat, and chat without token, must both fail fast —
+        // otherwise the user's own fill/P&L text silently reroutes through the
+        // platform relay.
+        let token_only: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A"}"#).unwrap();
+        assert!(token_only.validate().is_err());
+        let chat_only: TelegramConfig = serde_json::from_str(r#"{"chat_id":"9"}"#).unwrap();
+        assert!(chat_only.validate().is_err());
+        // empty-string counts as absent.
+        let empty_chat: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A","chat_id":""}"#).unwrap();
+        assert!(empty_chat.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_complete_and_platform_and_disabled() {
+        // Both present (direct), neither present (platform), and disabled all pass.
+        let direct: TelegramConfig =
+            serde_json::from_str(r#"{"bot_token":"1:A","chat_id":"9"}"#).unwrap();
+        assert!(direct.validate().is_ok());
+        let platform: TelegramConfig = serde_json::from_str(r#"{"enable":true}"#).unwrap();
+        assert!(platform.validate().is_ok());
+        // A disabled block is exempt even if half-filled — it sends nothing.
+        let disabled_partial: TelegramConfig =
+            serde_json::from_str(r#"{"enable":false,"bot_token":"1:A"}"#).unwrap();
+        assert!(disabled_partial.validate().is_ok());
     }
 }
 

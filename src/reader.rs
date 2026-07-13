@@ -101,6 +101,11 @@ pub struct TradeRow {
     /// legacy rows / older bots.
     #[serde(default)]
     pub exchange: String,
+    /// Config-version id (`cfg-…`) active when the trade closed — ties the
+    /// trade to the exact config that produced it. `""` for legacy rows /
+    /// bots predating config versioning.
+    #[serde(default)]
+    pub config_version: String,
 }
 
 /// Optional filters for [`TradeReader::list_trades`]. Empty-string / `None`
@@ -201,6 +206,10 @@ pub struct StatusInfo {
     pub version: String,
     pub mode: String,
     pub exchange: String,
+    /// The bot's market (`"binance-coinm"` / `"binance-usdm"` / …), so a
+    /// watchdog can learn which account it guards from the bot. Empty if
+    /// unknown (older bot).
+    pub market: String,
     pub uptime_secs: u64,
     pub symbol_count: u32,
     pub position_count: u32,
@@ -336,6 +345,7 @@ mod tests {
                 source: "auto".into(),
                 market_type: "linear".into(),
                 exchange: "binance".into(),
+                config_version: "cfg-test".into(),
             }],
             next_cursor: Some("2:7".into()),
             total: 1,

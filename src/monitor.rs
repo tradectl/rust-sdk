@@ -122,6 +122,21 @@ pub struct ShadowTrade {
     pub exit_time: u64,
 }
 
+/// Settings-apply progress: a queued when-flat change landed on (or was
+/// skipped for) one symbol. The Lab flips its per-symbol pending chips off
+/// these frames instead of polling `GET /v1/config`.
+#[derive(serde::Serialize, Clone)]
+pub struct ConfigApplied {
+    pub strategy: String,
+    pub symbol: String,
+    /// Config epoch at emit time (matches `GET /v1/config`).
+    pub epoch: u64,
+    /// The keys that changed on this symbol.
+    pub keys: Vec<String>,
+    /// `"lab"` | `"revert"`.
+    pub origin: String,
+}
+
 /// Tagged event envelope for JSON serialization.
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
@@ -129,6 +144,7 @@ pub enum MonitorEvent {
     Tick(MonitorTick),
     Fill(MonitorFill),
     Shadow(ShadowSummary),
+    Config(ConfigApplied),
 }
 
 /// Fans monitor events out to subscribers over a `tokio::broadcast` channel.
