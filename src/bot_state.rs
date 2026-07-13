@@ -78,6 +78,14 @@ pub struct PositionSnapshot {
     pub unrealized_pnl_pct: f64,
     pub tp_price: f64,
     pub sl_price: f64,
+    /// True when `sl_price` is a client-side VIRTUAL stop the runner enforces
+    /// per-tick with no resting order on the exchange (opt-in `virtual_sl`),
+    /// as opposed to a real exchange-resting stop. The watchdog reads this to
+    /// tell an intentional virtual SL apart from a lost/absent one: a healthy
+    /// bot's declared virtual SL is enforced on breach rather than force-closed
+    /// at the unprotected-time cap.
+    #[serde(default)]
+    pub virtual_sl: bool,
     pub strategy_name: String,
     pub timestamp_ms: u64,
 }
@@ -660,6 +668,7 @@ mod position_tests {
             unrealized_pnl_pct: 0.0,
             tp_price: 0.0,
             sl_price: sl,
+            virtual_sl: false,
             strategy_name: strategy_name.to_string(),
             timestamp_ms: 0,
         }
