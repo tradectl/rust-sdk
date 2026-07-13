@@ -36,8 +36,18 @@ const RECENT_FILLS_CAP: usize = 200;
 
 /// Shared bot state, created by the runner and passed to MCP/AI plugins.
 pub struct BotState {
-    /// Per-symbol position snapshots, updated on every fill.
-    positions: RwLock<HashMap<String, PositionSnapshot>>,
+    /// Position snapshots keyed by `(strategy_name, symbol)`, updated on
+    /// every fill. Keying on symbol alone would collide whenever more than
+    /// one strategy instance trades the same symbol concurrently (a grid
+    /// config routinely runs several rungs — e.g. distinct `225S`/`30S`
+    /// strategy entries — on one symbol at once): each rung's update would
+    /// silently clobber the previous one's snapshot, so `/v1/status`
+    /// undercounts open positions and `/v1/intent` is missing rows for
+    /// every rung but the last-written one. That gap once let the watchdog
+    /// classify a bot as "blind" and force-close a position that actually
+    /// had a live virtual stop-loss the bot's own state simply couldn't
+    /// surface.
+    positions: RwLock<HashMap<(String, String), PositionSnapshot>>,
     /// Recent fills across all symbols, ring buffer.
     recent_fills: RwLock<VecDeque<FillSnapshot>>,
     /// Per-symbol latest ticker, updated on every tick.
@@ -68,6 +78,14 @@ pub struct PositionSnapshot {
     pub unrealized_pnl_pct: f64,
     pub tp_price: f64,
     pub sl_price: f64,
+    /// True when `sl_price` is a client-side VIRTUAL stop the runner enforces
+    /// per-tick with no resting order on the exchange (opt-in `virtual_sl`),
+    /// as opposed to a real exchange-resting stop. The watchdog reads this to
+    /// tell an intentional virtual SL apart from a lost/absent one: a healthy
+    /// bot's declared virtual SL is enforced on breach rather than force-closed
+    /// at the unprotected-time cap.
+    #[serde(default)]
+    pub virtual_sl: bool,
     pub strategy_name: String,
     pub timestamp_ms: u64,
 }
@@ -277,12 +295,20 @@ impl BotState {
 
     // ── Write methods (called by runner) ───────────────────────
 
-    /// Update position for a symbol. Pass `None` to remove (position closed).
-    pub async fn update_position(&self, symbol: &str, snapshot: Option<PositionSnapshot>) {
+    /// Update position for one strategy instance's symbol. Pass `None` to
+    /// remove (position closed). `strategy_name` disambiguates concurrent
+    /// rungs on the same symbol — see the `positions` field doc.
+    pub async fn update_position(
+        &self,
+        strategy_name: &str,
+        symbol: &str,
+        snapshot: Option<PositionSnapshot>,
+    ) {
         let mut positions = self.positions.write().await;
+        let key = (strategy_name.to_string(), symbol.to_string());
         match snapshot {
-            Some(s) => { positions.insert(symbol.to_string(), s); }
-            None => { positions.remove(symbol); }
+            Some(s) => { positions.insert(key, s); }
+            None => { positions.remove(&key); }
         }
     }
 
@@ -360,11 +386,14 @@ impl BotState {
 
     // ── Read methods (called by MCP/AI) ────────────────────────
 
-    /// Get all open positions, optionally filtered by symbol.
+    /// Get all open positions, optionally filtered by symbol. A symbol can
+    /// have more than one entry here (one per strategy instance/rung
+    /// trading it), so this filters by the snapshot's own `symbol` field
+    /// rather than doing a keyed lookup.
     pub async fn get_positions(&self, symbol: Option<&str>) -> Vec<PositionSnapshot> {
         let positions = self.positions.read().await;
         match symbol {
-            Some(s) => positions.get(s).into_iter().cloned().collect(),
+            Some(s) => positions.values().filter(|p| p.symbol == s).cloned().collect(),
             None => positions.values().cloned().collect(),
         }
     }
@@ -586,19 +615,25 @@ impl BotState {
             if pnl >= 0.0 { e.1 += 1; }
         }
 
-        // Include symbols that have positions but no closed trades yet
-        for sym in positions.keys() {
-            by_symbol.entry(sym.clone()).or_insert((0, 0, 0.0));
+        // Include symbols that have positions but no closed trades yet. A
+        // symbol can have more than one open position (one per strategy
+        // instance/rung trading it), so this keys on the snapshot's own
+        // `symbol` field rather than the `(strategy_name, symbol)` map key.
+        for pos in positions.values() {
+            by_symbol.entry(pos.symbol.clone()).or_insert((0, 0, 0.0));
         }
 
         let mut comparisons: Vec<SymbolComparison> = by_symbol.into_iter()
             .map(|(symbol, (trades, wins, pnl))| {
-                let pos = positions.get(&symbol);
+                // Aggregate across every rung currently open on this symbol.
+                let matching: Vec<&PositionSnapshot> =
+                    positions.values().filter(|p| p.symbol == symbol).collect();
+                let unrealized_pnl: f64 = matching.iter().map(|p| p.unrealized_pnl).sum();
                 SymbolComparison {
                     win_rate_pct: if trades > 0 { wins as f64 / trades as f64 * 100.0 } else { 0.0 },
                     avg_pnl_usd: if trades > 0 { pnl / trades as f64 } else { 0.0 },
-                    has_position: pos.is_some(),
-                    unrealized_pnl: pos.map(|p| p.unrealized_pnl).unwrap_or(0.0),
+                    has_position: !matching.is_empty(),
+                    unrealized_pnl,
                     symbol, trades, wins, pnl_usd: pnl,
                 }
             })
@@ -615,5 +650,97 @@ impl BotState {
 impl crate::reader::PositionReader for BotState {
     fn positions(&self) -> Vec<PositionSnapshot> {
         self.try_get_positions()
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    fn snap(strategy_name: &str, symbol: &str, qty: f64, sl: f64) -> PositionSnapshot {
+        PositionSnapshot {
+            symbol: symbol.to_string(),
+            side: "SHORT".to_string(),
+            avg_entry: 1.0,
+            quantity: qty,
+            entry_count: 1,
+            unrealized_pnl: 0.0,
+            unrealized_pnl_pct: 0.0,
+            tp_price: 0.0,
+            sl_price: sl,
+            virtual_sl: false,
+            strategy_name: strategy_name.to_string(),
+            timestamp_ms: 0,
+        }
+    }
+
+    /// The regression this module exists to prevent: two strategy
+    /// instances ("rungs") trading the same symbol at once must not
+    /// clobber each other's position snapshot. Before this fix, keying on
+    /// bare symbol meant the second `update_position` call silently
+    /// erased the first rung's entry — undercounting `/v1/status`'s
+    /// position_count and dropping rows from `/v1/intent`, including any
+    /// virtual stop-loss the erased rung had armed.
+    #[tokio::test]
+    async fn concurrent_rungs_on_one_symbol_do_not_clobber_each_other() {
+        let state = BotState::new();
+        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+
+        let all = state.try_get_positions();
+        assert_eq!(all.len(), 2, "both rungs must survive, not just the last-written one");
+        let rung_30s = all.iter().find(|p| p.strategy_name == "30S").expect("30S rung missing");
+        assert_eq!(rung_30s.sl_price, 0.01138, "the virtual SL price must not be lost");
+    }
+
+    /// Removing one rung's position (its own close) must not remove a
+    /// different rung still open on the same symbol.
+    #[tokio::test]
+    async fn removing_one_rung_leaves_the_others_on_the_same_symbol() {
+        let state = BotState::new();
+        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+
+        state.update_position("225S", "XANUSDT", None).await;
+
+        let all = state.try_get_positions();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].strategy_name, "30S");
+    }
+
+    /// `get_positions(Some(symbol))` must return every rung open on that
+    /// symbol, not the single surviving entry a bare-symbol key would have
+    /// forced.
+    #[tokio::test]
+    async fn get_positions_by_symbol_returns_every_rung() {
+        let state = BotState::new();
+        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+        state.update_position("08S", "ETHUSDT", Some(snap("08S", "ETHUSDT", 1.0, 0.0))).await;
+
+        let xan = state.get_positions(Some("XANUSDT")).await;
+        assert_eq!(xan.len(), 2);
+        assert!(xan.iter().all(|p| p.symbol == "XANUSDT"));
+
+        let eth = state.get_positions(Some("ETHUSDT")).await;
+        assert_eq!(eth.len(), 1);
+    }
+
+    /// `get_symbol_comparison` aggregates unrealized P&L across every rung
+    /// on a symbol instead of reflecting only the last-written one.
+    #[tokio::test]
+    async fn symbol_comparison_aggregates_across_rungs() {
+        let state = BotState::new();
+        let mut a = snap("225S", "XANUSDT", 715.0, 0.0);
+        a.unrealized_pnl = -1.5;
+        let mut b = snap("30S", "XANUSDT", 990.0, 0.01138);
+        b.unrealized_pnl = 2.0;
+        state.update_position("225S", "XANUSDT", Some(a)).await;
+        state.update_position("30S", "XANUSDT", Some(b)).await;
+
+        let comparisons = state.get_symbol_comparison().await;
+        let xan = comparisons.iter().find(|c| c.symbol == "XANUSDT").expect("XANUSDT missing");
+        assert!(xan.has_position);
+        assert!((xan.unrealized_pnl - 0.5).abs() < 1e-9);
     }
 }

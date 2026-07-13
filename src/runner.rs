@@ -505,14 +505,20 @@ pub fn log_filled(
 }
 
 /// `[cid][name/symbol][Xms] edited: price -> X, qty Y`
+///
+/// Emitted at **debug** (not info) on purpose: edit confirmations fire on every
+/// re-quote and flooded the Lab logs strip. bot-api captures INFO+ only, so
+/// this drops out of the live feed while staying in the debug file log. It does
+/// NOT route through `log_order` (which is info) for that reason.
 pub fn log_edited(
     cid: &str, name: &str, symbol: &str,
     price: f64, qty_str: &str,
     elapsed_ms: u128,
 ) {
-    log_order(cid, name, symbol, format_args!(
-        "[{}ms] edited: price -> {}{}", elapsed_ms, trunc5(price), qty_str
-    ));
+    log::debug!(
+        "[{}][{}/{}] [{}ms] edited: price -> {}{}",
+        cid, name, symbol, elapsed_ms, trunc5(price), qty_str
+    );
 }
 
 /// `[cid][name/symbol][Xms] canceled`

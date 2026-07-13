@@ -17,6 +17,10 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
+    /// Defaultable so a partial paste (e.g. a strats-only document merged
+    /// via the Lab's setup panel) parses; an absent block means "no
+    /// credentials yet" (provider Binance, empty keys) — awaiting-setup.
+    #[serde(default)]
     pub api: ApiConfig,
     pub limits: Option<LimitsConfig>,
     pub db: Option<DbConfig>,
@@ -67,6 +71,12 @@ pub struct LabConfig {
     /// platform echo. Plumbed from `--public-host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_host: Option<String>,
+    /// Write access for the Lab settings surface (`/v1/config*`).
+    /// `"full"` (default — possession of the pair blob means you own the
+    /// bot) or `"read_only"` (view-only lab: the settings routes answer 404
+    /// and nothing can be changed remotely).
+    #[serde(default = "default_lab_control")]
+    pub control: String,
 }
 
 impl Default for LabConfig {
@@ -77,12 +87,14 @@ impl Default for LabConfig {
             bind: default_lab_bind(),
             publish: true,
             public_host: None,
+            control: default_lab_control(),
         }
     }
 }
 
 fn default_lab_port() -> u16 { 9103 }
 fn default_lab_bind() -> String { "127.0.0.1".into() }
+fn default_lab_control() -> String { "full".into() }
 
 impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
@@ -333,11 +345,16 @@ pub struct ApiConfig {
     /// max leverage below the account's cached value. Default: false.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
-    /// Force hedge mode (dual-side position) on the exchange. When enabled,
-    /// every order includes `positionSide=LONG/SHORT`. Also auto-detected
-    /// when strategies with opposite directions share a symbol.
+    /// Force hedge mode (dual-side position) on the exchange. `None` (the
+    /// default — omit the key) means "leave it alone": the adapter detects
+    /// and uses whatever mode the account is already in, without ever
+    /// trying to switch it. `Some(true/false)` forces that mode at startup,
+    /// which the exchange refuses if the account has any order or position
+    /// open (Binance -4067) — the account-wide mode can't change while
+    /// anything is resting. When enabled, every order includes
+    /// `positionSide=LONG/SHORT`.
     #[serde(default)]
-    pub hedge_mode: bool,
+    pub hedge_mode: Option<bool>,
 }
 
 impl Default for ApiConfig {
@@ -351,7 +368,7 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             auto_adjust_leverage: false,
-            hedge_mode: false,
+            hedge_mode: None,
         }
     }
 }
