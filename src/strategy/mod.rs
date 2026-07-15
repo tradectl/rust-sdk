@@ -247,7 +247,10 @@ pub struct FillResponse {
 /// A price line to display on the monitor chart.
 /// Strategies return these from `monitor_snapshot` — the runner passes them
 /// through without interpretation.
-#[derive(Clone, Debug, serde::Serialize)]
+///
+/// `Default` is derived so construction sites can use `..Default::default()`
+/// and skip the optional `param_*` fields (which most lines leave unset).
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct PriceLine {
     pub label: String,
     pub price: f64,
@@ -256,6 +259,28 @@ pub struct PriceLine {
     pub style: String,
     pub line_width: u8,
     pub axis_label: bool,
+    /// When this line visualizes a strategy *parameter* (e.g. a take-profit or
+    /// stop-loss level derived from a config value), the parameter's name —
+    /// surfaced verbatim in the Lab chart's hover tooltip. `None` for lines that
+    /// don't map to a single parameter (corridor bounds, live entry, anchors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_name: Option<String>,
+    /// The parameter's value paired with [`param_name`](Self::param_name), shown
+    /// next to the name in the tooltip (e.g. `takeProfit = 1.5`). Units are the
+    /// strategy's choice — encode them in `param_name` (e.g. `"takeProfit %"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_value: Option<f64>,
+}
+
+impl PriceLine {
+    /// Tag this line with the strategy parameter it visualizes (name + value),
+    /// for the Lab chart's hover tooltip. Builder-style so a line literal can
+    /// end `..Default::default()` and then `.with_param("takeProfit", 1.5)`.
+    pub fn with_param(mut self, name: impl Into<String>, value: f64) -> Self {
+        self.param_name = Some(name.into());
+        self.param_value = Some(value);
+        self
+    }
 }
 
 /// Monitor snapshot returned by a strategy — generic price lines + arbitrary state.

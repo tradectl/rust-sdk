@@ -146,6 +146,8 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(PriceLine, style) as u64);
     h = mix(h, offset_of!(PriceLine, line_width) as u64);
     h = mix(h, offset_of!(PriceLine, axis_label) as u64);
+    h = mix(h, offset_of!(PriceLine, param_name) as u64);
+    h = mix(h, offset_of!(PriceLine, param_value) as u64);
 
     // -- MonitorSnapshot --
     h = mix(h, size_of::<MonitorSnapshot>() as u64);
