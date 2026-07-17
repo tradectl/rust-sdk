@@ -422,6 +422,13 @@ fn default_retention_days() -> u32 { 30 }
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StratEntry {
+    /// Stable per-entry identity (`st_xxxxxxxx`), assigned by the bot at
+    /// config load/import when absent and persisted back. Names are NOT
+    /// unique (same-named variants are supported), so every API that
+    /// modifies an entry addresses it by this id when available. Never
+    /// user-edited; imports that clone an entry get a fresh id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     #[serde(rename = "type")]
     pub strategy_type: String,
