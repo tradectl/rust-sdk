@@ -40,6 +40,13 @@ pub enum ApiErrorKind {
     MaxPositionExceeded,
     /// -4164: Order notional below exchange minimum.
     MinNotional,
+    /// -1111: Price/quantity precision over the maximum defined for the
+    /// symbol. Deterministic — the same request can never succeed. Reaching
+    /// the exchange with this error means order values were built without
+    /// (or with stale) pair metadata; the persistent breaker stops the
+    /// strategy instead of retrying, because rejected orders still count
+    /// against the account's order-rate limits.
+    PrecisionError,
     /// -4198 (REST) / -5026 (WS API): per-order amendment cap reached. The
     /// order can never be modified again — the runner cancels it and places
     /// a fresh, amendable order.
@@ -169,7 +176,7 @@ impl ExchangeApiError {
     /// Excludes `InsufficientMargin`, which is recoverable on the wall
     /// clock and routed through `is_recoverable()` instead.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded)
+        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded | ApiErrorKind::PrecisionError)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
@@ -220,6 +227,7 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -4005 => ApiErrorKind::QuantityExceeded,
         -2027 => ApiErrorKind::MaxPositionExceeded,
         -4164 => ApiErrorKind::MinNotional,
+        -1111 => ApiErrorKind::PrecisionError,
         -4198 | -5026 => ApiErrorKind::ModifyLimitExceeded,
         -1003 => ApiErrorKind::RateLimited,
         -1112 => ApiErrorKind::DuplicateOrderId,
@@ -322,12 +330,41 @@ mod tests {
 
     #[test]
     fn parse_unknown_code_with_margin_message() {
-        let body = r#"{"code":-1111,"msg":"Not enough balance for this operation"}"#;
+        let body = r#"{"code":-9876,"msg":"Not enough balance for this operation"}"#;
         let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
         assert!(err.is_margin());
         assert!(err.is_recoverable());
         assert!(!err.is_persistent());
+    }
+
+    #[test]
+    fn parse_precision_error_is_persistent() {
+        // A symbol missing from the pair-info cache gets ordered with an
+        // unrounded quantity. The exchange rejects with -1111
+        // deterministically — the same request can never succeed — so the
+        // persistent-error breaker must stop the strategy instead of
+        // retrying forever: rejected orders still count against the
+        // account's order-rate limits and starve every other symbol.
+        let body = r#"{"code":-1111,"msg":"Precision is over the maximum defined for this asset."}"#;
+        let err = ExchangeApiError::from_response(400, body, "WS order.place".into());
+        assert_eq!(err.kind, ApiErrorKind::PrecisionError);
+        assert!(err.is_persistent(), "-1111 must trip the persistent breaker");
+        assert!(!err.is_recoverable(), "retrying the same request cannot succeed");
+        assert!(!err.is_retryable());
+        assert!(!err.is_fatal());
+        assert!(!err.is_margin());
+        assert!(!err.is_silent(), "operator must see the alert when the breaker trips");
+    }
+
+    #[test]
+    fn precision_error_code_takes_precedence_over_message_keywords() {
+        // Code-based classification must win even if the message happens to
+        // contain a keyword-fallback trigger word like "exceeds".
+        let body = r#"{"code":-1111,"msg":"Precision exceeds the maximum for this asset."}"#;
+        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        assert_eq!(err.kind, ApiErrorKind::PrecisionError);
+        assert!(err.is_persistent());
     }
 
     #[test]
