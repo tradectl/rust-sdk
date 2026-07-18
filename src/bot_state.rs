@@ -3,7 +3,7 @@
 //! All fields use `RwLock` for concurrent reads from multiple tool calls.
 //! The runner writes from symbol tasks; MCP/AI plugins read via `Arc<BotState>`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::RwLock;
 use serde::Serialize;
 
@@ -62,6 +62,11 @@ pub struct BotState {
     strategy_states: RwLock<HashMap<String, serde_json::Value>>,
     /// Strategy documentation (loaded from STRATEGY.md files).
     strategy_docs: RwLock<HashMap<String, String>>,
+    /// Names of emulator (paper) strategies, set once at startup. Used to
+    /// stamp `PositionSnapshot::emulated` on write so the watchdog-facing API
+    /// can exclude paper positions. A plain `std::sync::RwLock` (not tokio's):
+    /// it's read briefly inside `update_position` without crossing an `.await`.
+    emulators: std::sync::RwLock<HashSet<String>>,
 }
 
 // ── Snapshot types ─────────────────────────────────────────────
@@ -86,7 +91,24 @@ pub struct PositionSnapshot {
     /// at the unprotected-time cap.
     #[serde(default)]
     pub virtual_sl: bool,
+    /// Exchange order id of the resting stop backing `sl_price` (empty for a
+    /// virtual or not-yet-placed stop). Forwarded to the watchdog via
+    /// `/v1/intent` so it can match the declared stop to a real open order.
+    #[serde(default)]
+    pub sl_order_id: String,
+    /// Exchange order id of the resting take-profit backing `tp_price` (empty
+    /// when none is resting).
+    #[serde(default)]
+    pub tp_order_id: String,
     pub strategy_name: String,
+    /// True when this snapshot belongs to an emulator (paper) strategy — its
+    /// orders never reach the real exchange. Stamped by [`BotState`] from the
+    /// emulator-name set so the watchdog-facing surface (`/v1/intent`,
+    /// `/v1/status` position_count) can exclude paper positions: the watchdog
+    /// guards a REAL exchange account and must never match a real net position
+    /// against a paper rung's declared (paper-only) protection.
+    #[serde(default)]
+    pub emulated: bool,
     pub timestamp_ms: u64,
 }
 
@@ -290,7 +312,15 @@ impl BotState {
             shadow_summaries: RwLock::new(HashMap::new()),
             strategy_states: RwLock::new(HashMap::new()),
             strategy_docs: RwLock::new(HashMap::new()),
+            emulators: std::sync::RwLock::new(HashSet::new()),
         }
+    }
+
+    /// Record which strategy names are emulators (paper). Called once at
+    /// startup, before any position write, so every `PositionSnapshot` is
+    /// stamped with the correct `emulated` flag as it's written.
+    pub fn set_emulators(&self, names: HashSet<String>) {
+        *self.emulators.write().unwrap() = names;
     }
 
     // ── Write methods (called by runner) ───────────────────────
@@ -307,7 +337,13 @@ impl BotState {
         let mut positions = self.positions.write().await;
         let key = (strategy_name.to_string(), symbol.to_string());
         match snapshot {
-            Some(s) => { positions.insert(key, s); }
+            Some(mut s) => {
+                // Authoritative stamp from the emulator-name set — a rung is
+                // paper iff its strategy was configured as an emulator, no
+                // matter what the caller passed.
+                s.emulated = self.emulators.read().unwrap().contains(strategy_name);
+                positions.insert(key, s);
+            }
             None => { positions.remove(&key); }
         }
     }
@@ -669,7 +705,10 @@ mod position_tests {
             tp_price: 0.0,
             sl_price: sl,
             virtual_sl: false,
+            sl_order_id: String::new(),
+            tp_order_id: String::new(),
             strategy_name: strategy_name.to_string(),
+            emulated: false,
             timestamp_ms: 0,
         }
     }

@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod batch;
 pub mod batch_exchange;
 
@@ -246,7 +247,10 @@ pub struct FillResponse {
 /// A price line to display on the monitor chart.
 /// Strategies return these from `monitor_snapshot` — the runner passes them
 /// through without interpretation.
-#[derive(Clone, Debug, serde::Serialize)]
+///
+/// `Default` is derived so construction sites can use `..Default::default()`
+/// and skip the optional `param_*` fields (which most lines leave unset).
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct PriceLine {
     pub label: String,
     pub price: f64,
@@ -255,6 +259,28 @@ pub struct PriceLine {
     pub style: String,
     pub line_width: u8,
     pub axis_label: bool,
+    /// When this line visualizes a strategy *parameter* (e.g. a take-profit or
+    /// stop-loss level derived from a config value), the parameter's name —
+    /// surfaced verbatim in the Lab chart's hover tooltip. `None` for lines that
+    /// don't map to a single parameter (corridor bounds, live entry, anchors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_name: Option<String>,
+    /// The parameter's value paired with [`param_name`](Self::param_name), shown
+    /// next to the name in the tooltip (e.g. `takeProfit = 1.5`). Units are the
+    /// strategy's choice — encode them in `param_name` (e.g. `"takeProfit %"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_value: Option<f64>,
+}
+
+impl PriceLine {
+    /// Tag this line with the strategy parameter it visualizes (name + value),
+    /// for the Lab chart's hover tooltip. Builder-style so a line literal can
+    /// end `..Default::default()` and then `.with_param("takeProfit", 1.5)`.
+    pub fn with_param(mut self, name: impl Into<String>, value: f64) -> Self {
+        self.param_name = Some(name.into());
+        self.param_value = Some(value);
+        self
+    }
 }
 
 /// Monitor snapshot returned by a strategy — generic price lines + arbitrary state.
@@ -353,6 +379,18 @@ pub struct StrategyPlugin {
     /// If `Some`, the shadow engine uses batch mode (~1000x throughput).
     /// `None` → generic per-variant mode (any strategy).
     pub batch_factory: Option<BatchFactory>,
+    /// Layout fingerprint ([`abi::ABI_LAYOUT_FINGERPRINT`]) of the SDK that
+    /// built this plugin. The loader ([`abi::check_plugin_abi`]) refuses the
+    /// plugin when it differs from the host CLI's — the `#[repr(Rust)]` boundary
+    /// types have compiler-dependent layout that `abi_version` does not capture.
+    pub abi_fingerprint: u64,
+    /// rustc version string that built the plugin (diagnostics only). Read only
+    /// after `abi_version` is confirmed to match.
+    pub rustc_version: *const u8,
+    pub rustc_version_len: usize,
+    /// tradectl-sdk version string that built the plugin (diagnostics only).
+    pub sdk_version: *const u8,
+    pub sdk_version_len: usize,
 }
 
 /// Current ABI version for strategy plugins.
@@ -361,7 +399,14 @@ pub struct StrategyPlugin {
 /// `StrategyContext::entry_orders` so strategies read their live entry orders
 /// from the runner instead of caching (and desyncing) their own pending-entry
 /// state. Changing the trait/context layout requires rebuilding all plugins.
-pub const STRATEGY_ABI_VERSION: u32 = 7;
+///
+/// Bumped 7 → 8: added `abi_fingerprint` + `rustc`/`sdk` version fields to
+/// [`StrategyPlugin`] so the loader can reject a plugin whose `#[repr(Rust)]`
+/// boundary layout does not match the host CLI (2026-07-14 bnum/bncm incident).
+/// The version bump makes old (v7, fingerprint-less) plugins fail this integer
+/// check first — read at `#[repr(C)]` offset 0 — before the new tail fields are
+/// ever touched, so migration is fail-closed with no UB.
+pub const STRATEGY_ABI_VERSION: u32 = 8;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
@@ -388,6 +433,11 @@ macro_rules! declare_strategy {
                 name_len: NAME.len(),
                 factory: |params| ::std::boxed::Box::new($factory(params)),
                 batch_factory: None,
+                abi_fingerprint: $crate::strategy::abi::ABI_LAYOUT_FINGERPRINT,
+                rustc_version: $crate::strategy::abi::SDK_RUSTC_VERSION.as_ptr(),
+                rustc_version_len: $crate::strategy::abi::SDK_RUSTC_VERSION.len(),
+                sdk_version: $crate::strategy::abi::SDK_VERSION.as_ptr(),
+                sdk_version_len: $crate::strategy::abi::SDK_VERSION.len(),
             }
         }
     };
@@ -417,6 +467,11 @@ macro_rules! declare_batch_strategy {
                 batch_factory: Some(|params, config, max_pos| {
                     ::std::boxed::Box::new($batch_factory(params, config, max_pos))
                 }),
+                abi_fingerprint: $crate::strategy::abi::ABI_LAYOUT_FINGERPRINT,
+                rustc_version: $crate::strategy::abi::SDK_RUSTC_VERSION.as_ptr(),
+                rustc_version_len: $crate::strategy::abi::SDK_RUSTC_VERSION.len(),
+                sdk_version: $crate::strategy::abi::SDK_VERSION.as_ptr(),
+                sdk_version_len: $crate::strategy::abi::SDK_VERSION.len(),
             }
         }
     };
