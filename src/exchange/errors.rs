@@ -29,6 +29,16 @@ pub enum ApiErrorKind {
     InsufficientMargin,
     /// -2015: Invalid API key, secret, or IP not whitelisted (FATAL).
     Unauthorized,
+    /// -2014 / -1022: an individual ORDER placement was rejected for auth
+    /// reasons — a malformed/empty API key ("API-key format invalid") or a
+    /// bad request signature. Unlike `Unauthorized` (-2015, account-fatal),
+    /// this stops only the offending STRATEGY after repeated failures
+    /// (persistent breaker), leaving paper and healthy sibling strategies
+    /// running. Prevents a misconfigured-live strategy (or a mid-session key
+    /// rotation) from spamming rejected live orders — 2026-07-18 emu→live
+    /// incident: a paper strategy switched to live on a keyless bot placed
+    /// 470 rejected orders in ~2 min before it was stopped by hand.
+    AuthRejected,
     /// -4199: Symbol is not in trading status (FATAL).
     SymbolNotTrading,
     /// -1015: Too many orders.
@@ -176,7 +186,7 @@ impl ExchangeApiError {
     /// Excludes `InsufficientMargin`, which is recoverable on the wall
     /// clock and routed through `is_recoverable()` instead.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded | ApiErrorKind::PrecisionError)
+        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded | ApiErrorKind::PrecisionError | ApiErrorKind::AuthRejected)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
@@ -222,6 +232,7 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -4197 => ApiErrorKind::SamePrice,
         -2019 => ApiErrorKind::InsufficientMargin,
         -2015 => ApiErrorKind::Unauthorized,
+        -2014 | -1022 => ApiErrorKind::AuthRejected,
         -4199 => ApiErrorKind::SymbolNotTrading,
         -1015 => ApiErrorKind::TooManyOrders,
         -4005 => ApiErrorKind::QuantityExceeded,
@@ -243,6 +254,15 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
                 || lower.contains("funds")
             {
                 ApiErrorKind::InsufficientMargin
+            } else if lower.contains("api-key")
+                || lower.contains("apikey")
+                || lower.contains("api key")
+                || lower.contains("signature")
+            {
+                // Auth rejection on an order (bad/empty key, bad signature)
+                // that didn't carry a mapped code — persistent (strategy
+                // self-halt), not account-fatal.
+                ApiErrorKind::AuthRejected
             } else {
                 ApiErrorKind::Unknown
             }
@@ -288,6 +308,42 @@ mod tests {
         assert_eq!(err.kind, ApiErrorKind::Unauthorized);
         assert!(err.is_fatal());
         assert_eq!(err.fatal_reason(), Some("invalid API key or IP not whitelisted"));
+    }
+
+    #[test]
+    fn order_auth_rejection_is_persistent_not_fatal() {
+        // -2014 (the 2026-07-18 emu→live storm): a live order rejected for a
+        // malformed/empty key must self-halt the STRATEGY (persistent breaker),
+        // NOT stop the whole bot (account-fatal) — paper siblings keep running.
+        let err = ExchangeApiError::from_response(
+            401,
+            r#"{"code":-2014,"msg":"API-key format invalid."}"#,
+            "POST /dapi/v1/order".into(),
+        );
+        assert_eq!(err.kind, ApiErrorKind::AuthRejected);
+        assert!(err.is_persistent(), "auth-rejected orders feed the 3-in-60s breaker");
+        assert!(!err.is_fatal(), "must not stop the whole bot");
+        assert!(!err.is_account_fatal());
+        assert!(!err.is_retryable(), "retrying with the same bad key just spams");
+    }
+
+    #[test]
+    fn signature_error_and_message_fallback_are_auth_rejected() {
+        // Mapped code -1022.
+        let sig = ExchangeApiError::from_response(
+            400,
+            r#"{"code":-1022,"msg":"Signature for this request is not valid."}"#,
+            "POST /dapi/v1/order".into(),
+        );
+        assert_eq!(sig.kind, ApiErrorKind::AuthRejected);
+        // Unmapped code but auth-worded message → still AuthRejected via fallback.
+        let fallback = ExchangeApiError::from_response(
+            401,
+            r#"{"code":-9999,"msg":"Invalid Api-Key format supplied."}"#,
+            "POST /dapi/v1/order".into(),
+        );
+        assert_eq!(fallback.kind, ApiErrorKind::AuthRejected);
+        assert!(fallback.is_persistent());
     }
 
     #[test]
