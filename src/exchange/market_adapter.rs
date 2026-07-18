@@ -143,11 +143,24 @@ pub trait MarketAdapter: Send + Sync {
     /// The hedge/dual-side-position mode actually in effect after
     /// `init()` — resolved from the exchange when the config left it
     /// unset (`ApiConfig.hedge_mode: None`), or the enforced value when
-    /// explicitly configured. Only exchanges with a toggleable
-    /// account-wide position mode (currently Binance) need to override
-    /// this; others don't use `positionSide` on orders, so `false` is
-    /// always correct for them.
-    fn resolved_hedge_mode(&self) -> bool {
-        false
-    }
+    /// explicitly configured. Concrete exchanges with a toggleable
+    /// account-wide position mode (currently Binance) override this;
+    /// others don't use `positionSide` on orders, so the `false` default
+    /// is correct for them.
+    ///
+    /// DELEGATING WRAPPERS (any adapter that wraps an inner `MarketAdapter`
+    /// — `ArcAdapter`, `PaperAdapter`, `LoggingAdapter`, …) MUST override
+    /// this to forward `self.inner.resolved_hedge_mode()`. If a wrapper
+    /// relies on the `false` default, it silently discards the inner
+    /// adapter's real value: on a hedge account the runner then omits
+    /// `positionSide` and every order is rejected -4061 (2026-07-18 COIN-M
+    /// incident — `ArcAdapter` had exactly this gap).
+    ///
+    /// Intentionally has NO default body: every impl must answer explicitly.
+    /// Concrete exchanges without a position mode return `false`; delegating
+    /// wrappers forward `self.inner.resolved_hedge_mode()`. A silent `false`
+    /// default is what let `ArcAdapter` drop the value — making this required
+    /// turns "wrapper forgot to forward it" into a compile error, not a
+    /// production `-4061` storm.
+    fn resolved_hedge_mode(&self) -> bool;
 }

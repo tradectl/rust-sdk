@@ -205,6 +205,7 @@ impl TestExchange {
 
 #[async_trait]
 impl MarketAdapter for TestExchange {
+    fn resolved_hedge_mode(&self) -> bool { false }
     fn market_type(&self) -> MarketType {
         self.market_type_val
     }
