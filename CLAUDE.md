@@ -315,14 +315,14 @@ pub enum ApiErrorKind {
 ```rust
 pub struct BotConfig {
     pub telegram: Option<TelegramConfig>,      // bot_token, chat_id, send_interval
-    pub api: ApiConfig,                        // provider, key, secret, ws, wallet_address, private_key, passphrase
+    pub api: ApiConfig,                        // provider, key, secret, ws, wallet_address, private_key, passphrase, autoAdjustLeverage, hedgeMode
     pub limits: Option<LimitsConfig>,          // max_loss_limit
     pub db: Option<DbConfig>,                  // path
     pub log: Option<LogConfig>,                // path, mode, level
     pub monitor: Option<MonitorConfig>,        // host (0.0.0.0), port (9100)
     pub paper: Option<PaperSettings>,          // latency_ms, jitter_ms
     pub strats: Vec<StratEntry>,               // name, type, marketType, isEmulator, pairs, params, direction, shadow, promotion, trigger, pairSelector
-    pub auto_adjust_leverage: bool,
+    // NOTE: autoAdjustLeverage lives on ApiConfig (api.autoAdjustLeverage), NOT here.
     pub mcp: Option<McpConfig>,                // enabled, host (127.0.0.1), port (9101)
     pub ai: Option<AiConfig>,                  // provider (anthropic/openai/ollama), model, api_key_env, telegram_agent
     pub strategy_docs: HashMap<String, String>,// loaded from STRATEGY.md files (skip serialization)

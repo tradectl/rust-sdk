@@ -95,6 +95,18 @@ pub trait MarketAdapter: Send + Sync {
     // ── Account ──────────────────────────────────────────────────
     fn get_fees(&self) -> MarketFees;
     fn get_leverage(&self, symbol: &str) -> f64;
+    /// Authoritative current leverage for `symbol`, fetching from the exchange
+    /// when the local cache is cold. `get_leverage` is a pure cache read that
+    /// returns a `1.0` default for a symbol never seen at init (e.g. one added
+    /// later by the pair selector) — which the -2027 auto-reduce path must NOT
+    /// mistake for "already at the 1x floor". Adapters that can query the venue
+    /// override this to fill the gap and warm the cache; the default returns
+    /// the cached read. (2026-07-19 STARUSDT: a pair-selector symbol with no
+    /// cache entry read as 1.0, so the reduce path would have stopped instead
+    /// of stepping leverage down.)
+    async fn current_leverage(&self, symbol: &str) -> ExchangeResult<f64> {
+        Ok(self.get_leverage(symbol))
+    }
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> ExchangeResult<()>;
     /// Maximum leverage allowed for the given symbol on this exchange/
     /// account. Default: `1` for Spot, `125` for futures — adapters
@@ -118,6 +130,30 @@ pub trait MarketAdapter: Send + Sync {
     ) -> ExchangeResult<Vec<(String, f64, u32)>> {
         Ok(Vec::new())
     }
+    /// Whether the runner should REACTIVELY reduce a symbol's leverage when
+    /// the exchange rejects an order with "max position exceeded at current
+    /// leverage" (Binance -2027) instead of halting the strategy. Mirrors the
+    /// `api.autoAdjustLeverage` config flag. A -2027 means the intended
+    /// position notional overflows the max-notional bracket at the current
+    /// leverage; stepping leverage DOWN widens that bracket. Only Binance
+    /// overrides this (returning the configured flag); all other concrete
+    /// exchanges return the `false` default because they don't drive this
+    /// error path.
+    ///
+    /// Note `try_auto_adjust_all_leverage` (above) is a *different, weaker*
+    /// mechanism: it runs once at subscribe time and only clamps a
+    /// stale-too-high leverage down to the exchange's first-bracket ceiling —
+    /// it never reduces to fit a notional bracket, so it does not resolve a
+    /// live -2027. This flag gates the reactive path that does.
+    ///
+    /// DELEGATING WRAPPERS (`ArcAdapter`, `LoggingAdapter`, any adapter that
+    /// wraps an inner `MarketAdapter`) MUST override this to forward
+    /// `self.inner.auto_adjust_leverage_enabled()`. A wrapper that keeps the
+    /// `false` default silently disables the auto-reduce for a Binance account
+    /// running behind it — the same wrapper-drops-the-value gap that burned
+    /// `resolved_hedge_mode` (2026-07-18), though here it degrades to the old
+    /// "stop the strategy" behaviour rather than an order-rejection storm.
+    fn auto_adjust_leverage_enabled(&self) -> bool { false }
     /// Switch between cross and isolated margin for a futures symbol.
     /// Default is a no-op (returns Ok) so adapters that don't support it
     /// — spot, paper, replay, exchanges without an exposed endpoint —
@@ -143,11 +179,24 @@ pub trait MarketAdapter: Send + Sync {
     /// The hedge/dual-side-position mode actually in effect after
     /// `init()` — resolved from the exchange when the config left it
     /// unset (`ApiConfig.hedge_mode: None`), or the enforced value when
-    /// explicitly configured. Only exchanges with a toggleable
-    /// account-wide position mode (currently Binance) need to override
-    /// this; others don't use `positionSide` on orders, so `false` is
-    /// always correct for them.
-    fn resolved_hedge_mode(&self) -> bool {
-        false
-    }
+    /// explicitly configured. Concrete exchanges with a toggleable
+    /// account-wide position mode (currently Binance) override this;
+    /// others don't use `positionSide` on orders, so the `false` default
+    /// is correct for them.
+    ///
+    /// DELEGATING WRAPPERS (any adapter that wraps an inner `MarketAdapter`
+    /// — `ArcAdapter`, `PaperAdapter`, `LoggingAdapter`, …) MUST override
+    /// this to forward `self.inner.resolved_hedge_mode()`. If a wrapper
+    /// relies on the `false` default, it silently discards the inner
+    /// adapter's real value: on a hedge account the runner then omits
+    /// `positionSide` and every order is rejected -4061 (2026-07-18 COIN-M
+    /// incident — `ArcAdapter` had exactly this gap).
+    ///
+    /// Intentionally has NO default body: every impl must answer explicitly.
+    /// Concrete exchanges without a position mode return `false`; delegating
+    /// wrappers forward `self.inner.resolved_hedge_mode()`. A silent `false`
+    /// default is what let `ArcAdapter` drop the value — making this required
+    /// turns "wrapper forgot to forward it" into a compile error, not a
+    /// production `-4061` storm.
+    fn resolved_hedge_mode(&self) -> bool;
 }

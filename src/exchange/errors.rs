@@ -41,6 +41,19 @@ pub enum ApiErrorKind {
     AuthRejected,
     /// -4199: Symbol is not in trading status (FATAL).
     SymbolNotTrading,
+    /// -4061: "Order's position side does not match user's setting" — the
+    /// account's Binance position mode (one-way vs hedge/dual-side) disagrees
+    /// with what the bot sends: hedge-format orders carry `positionSide=
+    /// LONG/SHORT`, one-way orders omit it, and the exchange rejects the
+    /// mismatch. This is an ACCOUNT-wide misconfiguration — it fails every
+    /// order of every strategy (entries, exits, closes) deterministically, and
+    /// only clears when the operator aligns the account mode with the config,
+    /// so it's account-fatal: stop the whole bot on the first occurrence rather
+    /// than retry-loop rejected orders against the account's rate limits.
+    /// 2026-07-18 COIN-M v0.2.1 incident: ~200 rejected orders/sec until the
+    /// bot was stopped by hand. `ensure_position_mode` normally prevents this
+    /// at startup; this classification catches a mode that flips mid-session.
+    PositionModeMismatch,
     /// -1015: Too many orders.
     TooManyOrders,
     /// -4005: Quantity exceeds max allowed.
@@ -135,7 +148,7 @@ impl ExchangeApiError {
     /// (every strategy and symbol) must stop. Only invalid credentials / IP
     /// qualify — there is no per-symbol recovery from these.
     pub fn is_account_fatal(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::Unauthorized)
+        matches!(self.kind, ApiErrorKind::Unauthorized | ApiErrorKind::PositionModeMismatch)
     }
 
     /// Symbol-level fatal: the affected symbol is halted/delisted (`-4199`),
@@ -150,6 +163,10 @@ impl ExchangeApiError {
         match self.kind {
             ApiErrorKind::Unauthorized => Some("invalid API key or IP not whitelisted"),
             ApiErrorKind::SymbolNotTrading => Some("symbol not in trading status"),
+            ApiErrorKind::PositionModeMismatch => Some(
+                "account position mode (one-way vs hedge) does not match the bot's config \
+                 — every order is rejected (-4061); align the account's Binance position \
+                 mode with this bot's hedgeMode setting"),
             _ => None,
         }
     }
@@ -234,6 +251,7 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -2015 => ApiErrorKind::Unauthorized,
         -2014 | -1022 => ApiErrorKind::AuthRejected,
         -4199 => ApiErrorKind::SymbolNotTrading,
+        -4061 => ApiErrorKind::PositionModeMismatch,
         -1015 => ApiErrorKind::TooManyOrders,
         -4005 => ApiErrorKind::QuantityExceeded,
         -2027 => ApiErrorKind::MaxPositionExceeded,
@@ -263,6 +281,10 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
                 // that didn't carry a mapped code — persistent (strategy
                 // self-halt), not account-fatal.
                 ApiErrorKind::AuthRejected
+            } else if lower.contains("position side") {
+                // -4061 worded without its code (e.g. a differently-wrapped
+                // WS API error) → still an account position-mode mismatch.
+                ApiErrorKind::PositionModeMismatch
             } else {
                 ApiErrorKind::Unknown
             }
@@ -371,6 +393,35 @@ mod tests {
         assert!(err.is_symbol_fatal(), "a halted symbol must stop only that symbol");
         assert!(!err.is_account_fatal(), "a halted symbol must NOT stop the whole bot");
         assert_eq!(err.fatal_reason(), Some("symbol not in trading status"));
+    }
+
+    #[test]
+    fn position_mode_mismatch_is_account_fatal() {
+        // -4061 (the 2026-07-18 COIN-M v0.2.1 storm): the account's position
+        // mode (one-way vs hedge) disagrees with what the bot sends, so EVERY
+        // order of every strategy is rejected deterministically. It must stop
+        // the whole bot on the first occurrence — not retry, not per-symbol,
+        // not per-strategy — because only an operator account change clears it.
+        let err = ExchangeApiError::from_response(
+            400,
+            r#"{"code":-4061,"msg":"Order's position side does not match user's setting."}"#,
+            "POST /dapi/v1/order".into(),
+        );
+        assert_eq!(err.kind, ApiErrorKind::PositionModeMismatch);
+        assert!(err.is_fatal());
+        assert!(err.is_account_fatal(), "-4061 must stop the whole bot");
+        assert!(!err.is_symbol_fatal());
+        assert!(!err.is_persistent(), "account-fatal, not the per-strategy breaker");
+        assert!(!err.is_retryable(), "retrying against a mismatched mode just spams -4061");
+        assert!(!err.is_silent(), "operator must be alerted");
+        assert!(err.fatal_reason().is_some());
+        // Message fallback: -4061 worded without its code still classifies.
+        let fallback = ExchangeApiError::from_response(
+            400,
+            r#"{"code":-9999,"msg":"Order's position side does not match user's setting."}"#,
+            "POST /dapi/v1/order".into(),
+        );
+        assert_eq!(fallback.kind, ApiErrorKind::PositionModeMismatch);
     }
 
     #[test]
