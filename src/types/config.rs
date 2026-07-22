@@ -11,11 +11,11 @@ use super::enums::Side;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
-    /// The bot's name. Purely informational: the bot's identity is its run
-    /// directory (`~/.tradectl/run/<name>/`, CLI-derived), and when this
-    /// field is set it MUST match — the runner refuses to start otherwise,
-    /// so a copied config can never silently fork settings persistence,
-    /// pairing, or reporting across two run dirs.
+    /// Display label only. The bot's identity — settings persistence,
+    /// pairing, telegram, reporting — is its run directory
+    /// (`~/.tradectl/run/<name>/`, CLI-derived); this field never moves any
+    /// path and is free to say anything (e.g. survive a config copied from
+    /// another bot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Platform trade-reporting key (`strategyKey` in the trades API).
