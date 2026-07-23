@@ -117,6 +117,15 @@ pub trait MarketAdapter: Send + Sync {
     async fn get_max_leverage(&self, _symbol: &str) -> ExchangeResult<u32> {
         Ok(if self.market_type() == MarketType::Spot { 1 } else { 125 })
     }
+    /// Force-refresh and return the exchange-max leverage for `symbol`,
+    /// bypassing any cache `get_max_leverage` populated. Used on the -2027
+    /// error path when the cached value looks like the unknown/125 sentinel
+    /// (a fresh listing whose bracket appeared after the subscribe-time
+    /// sweep) and we must confirm the real cap before clamping. Default:
+    /// delegates to `get_max_leverage`.
+    async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32> {
+        self.get_max_leverage(symbol).await
+    }
     /// Auto-adjust leverage for newly-subscribed symbols. Re-fetches
     /// bracket caps and lowers any symbol whose current leverage exceeds
     /// the exchange's first-bracket max. Called by the runner right after

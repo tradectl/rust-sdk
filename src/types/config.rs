@@ -11,11 +11,19 @@ use super::enums::Side;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
-    /// Operator-supplied name for this bot run. Used as the primary identity
-    /// in metrics reporting (`{name}@{hostname}`) and in the analytics tab.
-    /// Falls back to the config-file basename (CLI-derived) when None.
+    /// Display label only. The bot's identity — settings persistence,
+    /// pairing, telegram, reporting — is its run directory
+    /// (`~/.tradectl/run/<name>/`, CLI-derived); this field never moves any
+    /// path and is free to say anything (e.g. survive a config copied from
+    /// another bot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Platform trade-reporting key (`strategyKey` in the trades API).
+    /// Defaults to the bot name. Set this when trades must report under a
+    /// platform-registered strategy whose name differs from the bot's
+    /// (e.g. a bot dir `bncm` reporting as the registered strategy `shot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_key: Option<String>,
     pub telegram: Option<TelegramConfig>,
     /// Defaultable so a partial paste (e.g. a strats-only document merged
     /// via the Lab's setup panel) parses; an absent block means "no
