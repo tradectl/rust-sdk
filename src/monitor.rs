@@ -137,6 +137,21 @@ pub struct ConfigApplied {
     pub origin: String,
 }
 
+/// A strategy instance's live run-state transition, pushed the instant the
+/// runner records it (`ConfigAdmin::set_run_state` / `fail_if_running`) so the
+/// Lab's strategy editor repaints its status the moment it changes, instead of
+/// waiting for the next `GET /v1/config` poll. `id` is the stable strategy id
+/// (matches `StrategyConfigDto::id`); `run_state` is the same lower-case wire
+/// string as the config DTO (`starting` / `running` / `stopped` / `failed`),
+/// and `start_error` carries the reason when `run_state == "failed"`.
+#[derive(serde::Serialize, Clone)]
+pub struct RunStateFrame {
+    pub id: String,
+    pub run_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_error: Option<String>,
+}
+
 /// Tagged event envelope for JSON serialization.
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
@@ -145,6 +160,7 @@ pub enum MonitorEvent {
     Fill(MonitorFill),
     Shadow(ShadowSummary),
     Config(ConfigApplied),
+    RunState(RunStateFrame),
 }
 
 /// Fans monitor events out to subscribers over a `tokio::broadcast` channel.
