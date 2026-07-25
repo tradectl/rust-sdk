@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use async_trait::async_trait;
 use crate::types::{
-    BookTicker, KlineData, MarketFees, MarketType, Order, OrderRequest, OrderSide, OrderStatus,
-    OrderType, PairInfo, ProfitResult, Ticker24hr, TradeData,
+    BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest, OrderSide,
+    OrderStatus, OrderType, PairInfo, ProfitResult, Ticker24hr, TradeData,
     calculate_inverse_profit, calculate_linear_profit, calculate_spot_profit,
     InverseProfitParams, LinearProfitParams, SpotProfitParams,
 };
 use crate::exchange::market_adapter::{
-    BookTickerCallback, CallbackId, ExchangeResult, KlineCallback, MarketAdapter,
+    BookTickerCallback, CallbackId, DepthCallback, ExchangeResult, KlineCallback, MarketAdapter,
     OrderUpdateCallback, TradeCallback,
 };
 
@@ -489,6 +489,43 @@ impl MarketAdapter for TestExchange {
         self.leverage_map.write().unwrap().insert(symbol.to_string(), leverage);
         Ok(())
     }
+
+    // ── Capabilities this test double does not model ─────────────
+    // Explicit no-ops rather than inherited defaults: the trait is total so
+    // that a delegating wrapper cannot silently skip a forward.
+
+    async fn current_leverage(&self, symbol: &str) -> ExchangeResult<f64> {
+        Ok(self.get_leverage(symbol))
+    }
+
+    async fn get_max_leverage(&self, _symbol: &str) -> ExchangeResult<u32> {
+        Ok(if self.market_type() == MarketType::Spot { 1 } else { 125 })
+    }
+
+    async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32> {
+        self.get_max_leverage(symbol).await
+    }
+
+    async fn try_auto_adjust_all_leverage(
+        &self,
+        _symbols: &[String],
+    ) -> ExchangeResult<Vec<(String, f64, u32)>> {
+        Ok(Vec::new())
+    }
+
+    fn auto_adjust_leverage_enabled(&self) -> bool { false }
+
+    async fn set_margin_mode(&self, _symbol: &str, _isolated: bool) -> ExchangeResult<()> {
+        Ok(())
+    }
+
+    async fn ping(&self) -> ExchangeResult<u64> { Ok(0) }
+
+    fn on_depth(&self, _symbol: &str, _levels: usize, _cb: DepthCallback) -> CallbackId { 0 }
+    fn off_depth(&self, _symbol: &str, _id: CallbackId) {}
+    fn get_depth(&self, _symbol: &str) -> Option<OrderBookDepth> { None }
+
+    fn set_log_prefix(&self, _prefix: &str) {}
 
     async fn get_balance(&self) -> ExchangeResult<f64> {
         Ok(*self.balance.read().unwrap())

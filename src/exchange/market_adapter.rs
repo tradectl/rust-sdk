@@ -23,6 +23,32 @@ pub type ExchangeResult<T> = Result<T, ExchangeError>;
 /// (RwLock, AtomicU64, etc.) for mutable state. This allows the adapter
 /// to be shared via `Arc<dyn MarketAdapter>` without an outer Mutex,
 /// enabling parallel API calls across strategies.
+///
+/// # No default method bodies — ever
+///
+/// **Every method here is required. Do not add a defaulted method.**
+///
+/// Several types in the live stack are *delegating wrappers* — they hold an
+/// inner `MarketAdapter` and must forward every call (`ArcAdapter`,
+/// `LoggingAdapter`). A defaulted method turns "this wrapper forgot to
+/// forward" from a compile error into a plausible wrong answer at runtime,
+/// with no error, no log, and no trace. That has caused four production
+/// incidents:
+///
+/// | Method | Silently fell back to | Outcome |
+/// |---|---|---|
+/// | `resolved_hedge_mode` | `false` | 2026-07-18 `-4061` position-mode storm |
+/// | `get_max_leverage` | `125` | `-2027` clamp compared against a fabricated cap |
+/// | `try_auto_adjust_all_leverage` | `Ok(vec![])` | 2026-07-25 subscribe-time sweep dead since it shipped |
+/// | `on_depth`/`get_depth` | `0` / `None` | depth subscriptions silently dropped by `LoggingAdapter` |
+///
+/// The 32 methods that were always required have never caused one. Keeping
+/// the trait total is what makes the compiler, rather than reviewer memory,
+/// the thing that catches a missing forward.
+///
+/// An adapter that genuinely lacks a capability still writes the body — an
+/// explicit `Ok(())` / `0` / `None` at the impl site is a statement someone
+/// can read and challenge in review. Inheriting it invisibly is not.
 #[async_trait]
 pub trait MarketAdapter: Send + Sync {
     fn market_type(&self) -> MarketType;
@@ -32,8 +58,8 @@ pub trait MarketAdapter: Send + Sync {
     async fn stop(&self) -> ExchangeResult<()>;
 
     /// Ping exchange and return round-trip latency in milliseconds.
-    /// Default returns 0 (paper/test adapters).
-    async fn ping(&self) -> ExchangeResult<u64> { Ok(0) }
+    /// Adapters with no network round trip (paper, replay, tests) return `Ok(0)`.
+    async fn ping(&self) -> ExchangeResult<u64>;
 
     // ── Pair Management ──────────────────────────────────────────
     fn get_pairs(&self) -> HashMap<String, PairInfo>;
@@ -62,13 +88,14 @@ pub trait MarketAdapter: Send + Sync {
     fn on_trade(&self, symbol: &str, cb: TradeCallback) -> CallbackId;
     fn off_trade(&self, symbol: &str, id: CallbackId);
 
-    // ── L2 Depth (Push — optional, default no-op) ───────────────
+    // ── L2 Depth (Push) ──────────────────────────────────────────
     /// Subscribe to L2 order book depth updates. `levels` is the desired
     /// depth (adapter picks closest supported: e.g. Binance 5/10/20).
-    fn on_depth(&self, _symbol: &str, _levels: usize, _cb: DepthCallback) -> CallbackId { 0 }
-    fn off_depth(&self, _symbol: &str, _id: CallbackId) {}
+    /// Venues without a depth feed return `0` and never invoke `cb`.
+    fn on_depth(&self, symbol: &str, levels: usize, cb: DepthCallback) -> CallbackId;
+    fn off_depth(&self, symbol: &str, id: CallbackId);
     /// Get the latest cached depth snapshot. Returns None if not subscribed.
-    fn get_depth(&self, _symbol: &str) -> Option<OrderBookDepth> { None }
+    fn get_depth(&self, symbol: &str) -> Option<OrderBookDepth>;
 
     // ── Order Operations ─────────────────────────────────────────
     async fn place_order(&self, request: &OrderRequest) -> ExchangeResult<Order>;
@@ -103,51 +130,46 @@ pub trait MarketAdapter: Send + Sync {
     /// override this to fill the gap and warm the cache; the default returns
     /// the cached read. (2026-07-19 STARUSDT: a pair-selector symbol with no
     /// cache entry read as 1.0, so the reduce path would have stopped instead
-    /// of stepping leverage down.)
-    async fn current_leverage(&self, symbol: &str) -> ExchangeResult<f64> {
-        Ok(self.get_leverage(symbol))
-    }
+    /// of stepping leverage down.) Adapters that cannot query the venue
+    /// return `Ok(self.get_leverage(symbol))`.
+    async fn current_leverage(&self, symbol: &str) -> ExchangeResult<f64>;
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> ExchangeResult<()>;
     /// Maximum leverage allowed for the given symbol on this exchange/
-    /// account. Default: `1` for Spot, `125` for futures — adapters
-    /// should override to query the exchange's per-symbol brackets so
-    /// the UI's leverage slider clamps correctly (BTCUSDT might allow
-    /// 125, an alt might cap at 20). Errors degrade gracefully to the
-    /// default at the call site.
-    async fn get_max_leverage(&self, _symbol: &str) -> ExchangeResult<u32> {
-        Ok(if self.market_type() == MarketType::Spot { 1 } else { 125 })
-    }
+    /// account — query the venue's per-symbol brackets so the UI's leverage
+    /// slider clamps correctly (BTCUSDT might allow 125, an alt might cap
+    /// at 20). Where callers must tell "unknown" apart from a real cap, prefer
+    /// `Err` over a fabricated ceiling — nothing can distinguish a made-up
+    /// `125` from a genuine 125x cap, and the -2027 clamp misfires on exactly
+    /// that difference (see `BinanceAdapter`). Adapters that cannot enumerate
+    /// brackets currently return the venue ceiling instead; that is a known
+    /// wart, not a pattern to copy.
+    async fn get_max_leverage(&self, symbol: &str) -> ExchangeResult<u32>;
     /// Force-refresh and return the exchange-max leverage for `symbol`,
     /// bypassing any cache `get_max_leverage` populated. Used on the -2027
     /// error path when the cached value looks like the unknown/125 sentinel
     /// (a fresh listing whose bracket appeared after the subscribe-time
-    /// sweep) and we must confirm the real cap before clamping. Default:
-    /// delegates to `get_max_leverage`.
-    async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32> {
-        self.get_max_leverage(symbol).await
-    }
+    /// sweep) and we must confirm the real cap before clamping. Adapters
+    /// without a separate cache delegate to `get_max_leverage`.
+    async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32>;
     /// Auto-adjust leverage for newly-subscribed symbols. Re-fetches
     /// bracket caps and lowers any symbol whose current leverage exceeds
     /// the exchange's first-bracket max. Called by the runner right after
     /// `subscribe_pairs` so every traded symbol is checked at the moment
     /// it's added (initial config + dynamic pair-selector adds). Returns
     /// the list of `(symbol, old, new)` triples that were lowered.
-    /// Default: no-op for adapters without a leverage concept.
+    /// Adapters without a leverage concept return `Ok(Vec::new())`.
     async fn try_auto_adjust_all_leverage(
         &self,
-        _symbols: &[String],
-    ) -> ExchangeResult<Vec<(String, f64, u32)>> {
-        Ok(Vec::new())
-    }
+        symbols: &[String],
+    ) -> ExchangeResult<Vec<(String, f64, u32)>>;
     /// Whether the runner should REACTIVELY reduce a symbol's leverage when
     /// the exchange rejects an order with "max position exceeded at current
     /// leverage" (Binance -2027) instead of halting the strategy. Mirrors the
     /// `api.autoAdjustLeverage` config flag. A -2027 means the intended
     /// position notional overflows the max-notional bracket at the current
     /// leverage; stepping leverage DOWN widens that bracket. Only Binance
-    /// overrides this (returning the configured flag); all other concrete
-    /// exchanges return the `false` default because they don't drive this
-    /// error path.
+    /// returns the configured flag; all other concrete exchanges return
+    /// `false` because they don't drive this error path.
     ///
     /// Note `try_auto_adjust_all_leverage` (above) is a *different, weaker*
     /// mechanism: it runs once at subscribe time and only clamps a
@@ -155,21 +177,13 @@ pub trait MarketAdapter: Send + Sync {
     /// it never reduces to fit a notional bracket, so it does not resolve a
     /// live -2027. This flag gates the reactive path that does.
     ///
-    /// DELEGATING WRAPPERS (`ArcAdapter`, `LoggingAdapter`, any adapter that
-    /// wraps an inner `MarketAdapter`) MUST override this to forward
-    /// `self.inner.auto_adjust_leverage_enabled()`. A wrapper that keeps the
-    /// `false` default silently disables the auto-reduce for a Binance account
-    /// running behind it — the same wrapper-drops-the-value gap that burned
-    /// `resolved_hedge_mode` (2026-07-18), though here it degrades to the old
-    /// "stop the strategy" behaviour rather than an order-rejection storm.
-    fn auto_adjust_leverage_enabled(&self) -> bool { false }
+    /// Delegating wrappers forward `self.inner.auto_adjust_leverage_enabled()`.
+    fn auto_adjust_leverage_enabled(&self) -> bool;
     /// Switch between cross and isolated margin for a futures symbol.
-    /// Default is a no-op (returns Ok) so adapters that don't support it
-    /// — spot, paper, replay, exchanges without an exposed endpoint —
-    /// don't need a stub. Manual-trading server treats Ok as "applied".
-    async fn set_margin_mode(&self, _symbol: &str, _isolated: bool) -> ExchangeResult<()> {
-        Ok(())
-    }
+    /// Adapters that don't support it — spot, paper, replay, exchanges with
+    /// no exposed endpoint — return `Ok(())`, which the manual-trading server
+    /// treats as "applied".
+    async fn set_margin_mode(&self, symbol: &str, isolated: bool) -> ExchangeResult<()>;
     async fn get_balance(&self) -> ExchangeResult<f64>;
 
     // ── Profit ───────────────────────────────────────────────────
@@ -181,8 +195,9 @@ pub trait MarketAdapter: Send + Sync {
     fn generate_sl_id(&self, base_order_id: &str) -> String;
 
     // ── Logging context ──────────────────────────────────────────
-    /// Override the log prefix (e.g. strategy name). Default no-op.
-    fn set_log_prefix(&self, _prefix: &str) {}
+    /// Override the log prefix (e.g. strategy name). Adapters that don't
+    /// log return an empty body.
+    fn set_log_prefix(&self, prefix: &str);
 
     // ── Position mode ─────────────────────────────────────────────
     /// The hedge/dual-side-position mode actually in effect after
@@ -208,4 +223,75 @@ pub trait MarketAdapter: Send + Sync {
     /// turns "wrapper forgot to forward it" into a compile error, not a
     /// production `-4061` storm.
     fn resolved_hedge_mode(&self) -> bool;
+}
+
+#[cfg(test)]
+mod totality {
+    /// `MarketAdapter` must have **no default method bodies**.
+    ///
+    /// The trait is implemented by delegating wrappers (`ArcAdapter`,
+    /// `LoggingAdapter`) that have to forward every call. A defaulted method
+    /// lets such a wrapper compile while silently answering for the inner
+    /// adapter — four production incidents, all invisible until they cost
+    /// money (see the trait docs).
+    ///
+    /// Keeping every method required means the compiler rejects an incomplete
+    /// wrapper. This test guards the property itself, so re-adding a default
+    /// fails here rather than at 3am on a live account. If you are hitting
+    /// this: write the body out at each impl site instead — an explicit
+    /// `Ok(())` is reviewable, an inherited one is not.
+    #[test]
+    fn trait_has_no_default_method_bodies() {
+        let src = include_str!("market_adapter.rs");
+        let start = src.find("pub trait MarketAdapter").expect("trait present");
+        // The trait ends at the first `}` in column 0 after it starts.
+        let body = &src[start..];
+        let end = body.find("\n}").map(|e| e + 1).unwrap_or(body.len());
+        let body = &body[..end];
+
+        let mut defaulted = Vec::new();
+        for (idx, _) in body.match_indices("fn ") {
+            // Only method signatures at trait-item indentation.
+            let line_start = body[..idx].rfind('\n').map_or(0, |p| p + 1);
+            let prefix = &body[line_start..idx];
+            if !(prefix == "    " || prefix == "    async " || prefix == "    pub ") {
+                continue;
+            }
+            let name: String = body[idx + 3..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            // Walk past the argument list, then see whether the signature is
+            // terminated by `;` (required) or `{` (defaulted).
+            let Some(open) = body[idx..].find('(') else { continue };
+            let mut i = idx + open;
+            let mut depth = 0i32;
+            for (off, c) in body[i..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += off + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let terminator = body[i..].chars().find(|c| *c == ';' || *c == '{');
+            if terminator == Some('{') {
+                defaulted.push(name);
+            }
+        }
+
+        assert!(
+            defaulted.is_empty(),
+            "MarketAdapter must have no defaulted methods, found {}: {:?}\n\
+             A default lets a delegating wrapper silently skip the forward. \
+             Make it required and write the body at each impl site.",
+            defaulted.len(),
+            defaulted,
+        );
+    }
 }
