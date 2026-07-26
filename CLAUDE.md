@@ -304,7 +304,7 @@ pub enum ApiErrorKind {
 | `is_persistent()` | QuantityExceeded, MinNotional, MaxPositionExceeded | Stop strategy after MAX_PERSISTENT_ERRORS |
 | `is_recoverable()` | InsufficientMargin | Cancel resting entry, pause symbol 60 s; second strike escalates to stop |
 | `is_retryable()` | Network, RateLimited | Retry with backoff |
-| `is_silent()` | OrderNotFound, SamePrice, ReduceOnlyRejected, SlTriggerPrice, DuplicateOrderId, TooManyOrders, IpBanned, MaxPositionExceeded | No Telegram alert |
+| `is_silent()` | OrderNotFound, SamePrice, ReduceOnlyRejected, TriggerImmediate, DuplicateOrderId, TooManyOrders, IpBanned | No Telegram alert |
 | `is_margin()` | InsufficientMargin | Specific margin handling |
 
 `ExchangeApiError::from_response(status, body, endpoint)` parses exchange-specific JSON error responses.
