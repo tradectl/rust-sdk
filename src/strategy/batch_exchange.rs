@@ -314,8 +314,17 @@ impl BatchExchange {
         }
     }
 
-    /// Force-close all positions at the given bid price.
-    pub fn force_close_all(&mut self, bid_price: f64) {
+    /// Force-close all positions against the given book.
+    ///
+    /// Side-aware: a long is closed by selling, which happens at the **bid**; a
+    /// short is closed by buying, which happens at the **ask**. Pricing every
+    /// position at the bid hands each open short the full spread, and since
+    /// this runs at the end of every sweep trial that bias accumulates into the
+    /// rankings rather than into a single trade. Matches the scalar engine's
+    /// `market_close_position` (`backtest/src/exchange.rs`, `Long => bid,
+    /// Short => ask`) and this engine's own slippage rule — "long exits below
+    /// market, short exits above".
+    pub fn force_close_all(&mut self, bid_price: f64, ask_price: f64) {
         let mp = self.max_positions;
         for i in 0..self.n {
             self.entry_price[i] = 0.0;
@@ -323,7 +332,8 @@ impl BatchExchange {
             for j in 0..mp {
                 let slot = base + j;
                 if self.pos_active[slot] != 0 {
-                    self.close_position_at(i, slot, bid_price, false, 0);
+                    let exit_price = if self.pos_is_short[slot] { ask_price } else { bid_price };
+                    self.close_position_at(i, slot, exit_price, false, 0);
                 }
             }
         }
