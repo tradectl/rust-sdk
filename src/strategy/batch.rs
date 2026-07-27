@@ -115,9 +115,10 @@ pub trait BatchStrategy: Send {
     fn check_trade(&mut self, trade: &TradeEvent) {
         self.exchange_mut().check_trade(trade);
     }
-    /// Force-close all open positions at the given bid price.
-    fn force_close_all(&mut self, bid_price: f64) {
-        self.exchange_mut().force_close_all(bid_price);
+    /// Force-close all open positions against the given book — longs at the
+    /// bid, shorts at the ask. See [`BatchExchange::force_close_all`].
+    fn force_close_all(&mut self, bid_price: f64, ask_price: f64) {
+        self.exchange_mut().force_close_all(bid_price, ask_price);
     }
     /// Collect results for all trials.
     fn results(&self) -> Vec<BatchResult> {

@@ -204,7 +204,7 @@ pub trait BatchStrategy: Send {
     fn exchange_mut(&mut self) -> &mut BatchExchange;
     fn process_ticker(&mut self, ticker: &TickerEvent);      // required — strategy logic
     fn check_trade(&mut self, trade: &TradeEvent) { ... }    // delegates to exchange
-    fn force_close_all(&mut self, bid_price: f64) { ... }
+    fn force_close_all(&mut self, bid_price: f64, ask_price: f64) { ... }  // longs at bid, shorts at ask
     fn results(&self) -> Vec<BatchResult> { ... }
     fn trial_count(&self) -> usize { ... }
     fn reset(&mut self) { ... }
