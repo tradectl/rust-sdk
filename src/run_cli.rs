@@ -305,7 +305,7 @@ pub fn run_with_handler(handler: impl FnOnce(RunCommand)) {
 }
 
 fn run_live(_args: RunArgs, _factory: StrategyFactory) {
-    eprintln!("Direct run mode is handled by the tradectl-live runner.");
+    eprintln!("Direct run mode is handled by the tradectl-core runner.");
     eprintln!("Use `tradectl run --config <config.json>` instead.");
     std::process::exit(1);
 }

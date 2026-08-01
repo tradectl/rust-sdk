@@ -681,7 +681,7 @@ impl BotState {
 }
 
 /// Sync, non-blocking position access for the HTTP API. The impl lives
-/// here (not in `tradectl-live`) because both the trait and `BotState` are
+/// here (not in `tradectl-core`) because both the trait and `BotState` are
 /// SDK-owned — the orphan rule forbids implementing it downstream.
 impl crate::reader::PositionReader for BotState {
     fn positions(&self) -> Vec<PositionSnapshot> {

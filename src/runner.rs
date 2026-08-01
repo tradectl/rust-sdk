@@ -54,7 +54,7 @@ static LOG_GUARDS: OnceCell<Mutex<Vec<WorkerGuard>>> = OnceCell::new();
 static JANITOR: OnceCell<crate::logging::LogJanitor> = OnceCell::new();
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
 
-/// Optional extra layer installed by callers (e.g. `tradectl-live` with
+/// Optional extra layer installed by callers (e.g. `tradectl-core` with
 /// `feature="api"`) before `setup_logging` runs. Consumed once by
 /// `init_inner`. Stored as a `Box<dyn Any>` so the SDK itself does not
 /// depend on concrete layer types — the caller downcasts it internally.
@@ -179,7 +179,7 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
     }
 
     // Consume any extra layer registered before setup_logging was called
-    // (e.g. the log-capture layer wired by tradectl-live's bot-api feature).
+    // (e.g. the log-capture layer wired by tradectl-core's bot-api feature).
     if let Ok(mut guard) = EXTRA_LAYER.lock() {
         if let Some(extra) = guard.take() {
             layers.push(extra);
