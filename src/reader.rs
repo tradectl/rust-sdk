@@ -2,23 +2,24 @@
 //!
 //! `TradeReader` and `PositionReader` decouple any read-only consumer (the
 //! `tradectl-bot-api` HTTP crate, MCP tools, future exporters) from the
-//! concrete data sources that live inside `tradectl-live`
-//! (`TradeDBReader` over rusqlite, `BotState` over `RwLock`). A consumer
-//! depending on these traits never touches `rusqlite` or any exchange
-//! adapter.
+//! concrete data sources behind them: `TradeDBReader` over rusqlite, which
+//! lives in `tradectl-trade-db`, and `BotState` over `RwLock`, which lives in
+//! this crate (`bot_state.rs` — it implements `PositionReader` directly). A
+//! consumer depending on these traits never touches `rusqlite` or any
+//! exchange adapter.
 //!
 //! ## Type-movement note (v0.1.14)
 //!
 //! The concrete trade types (`TradeRow`, `TradeFilter`, `TradePage`,
-//! `CloseReason`) currently live in `tradectl-live::trade_db`, right next
+//! `CloseReason`) currently live in `tradectl-trade-db`, right next
 //! to the rusqlite reader that produces them. Hoisting them into the core
 //! SDK would drag a SQLite-shaped API into a crate that has no business
 //! knowing about SQLite, and would churn every existing consumer of those
-//! types in `tradectl-live`. That is the higher-risk option.
+//! types in `tradectl-trade-db`. That is the higher-risk option.
 //!
 //! So instead this module defines **wire-shape mirror structs** with fields
-//! identical to the `tradectl-live` originals. `tradectl-live` owns the
-//! `From` conversions at the boundary (see `trade_db.rs`). The mirrors
+//! identical to the `tradectl-trade-db` originals. `tradectl-trade-db` owns the
+//! `From` conversions at the boundary (see `trade-db/src/lib.rs`). The mirrors
 //! derive `serde` so an HTTP layer can serialize them straight onto the
 //! wire as the REST response body without inventing a third parallel type.
 
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Locked enum for UI display of why a trade closed. Mirrors
-/// `tradectl_live::trade_db::CloseReason`. The raw exchange/bot string is
+/// `tradectl_trade_db::CloseReason`. The raw exchange/bot string is
 /// preserved separately in [`TradeRow::close_reason_raw`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +43,7 @@ pub enum CloseReason {
 
 impl CloseReason {
     /// Map a raw `close_reason` string onto the locked enum, case-insensitively.
-    /// Mirrors `tradectl_live::trade_db::CloseReason::from_raw` exactly so the
+    /// Mirrors `tradectl_trade_db::CloseReason::from_raw` exactly so the
     /// HTTP `reason=` query filter and the SQLite reader agree.
     pub fn from_raw(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -70,7 +71,7 @@ impl CloseReason {
 }
 
 /// One closed-trade row. Field-for-field mirror of
-/// `tradectl_live::trade_db::TradeRow`.
+/// `tradectl_trade_db::TradeRow`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRow {
     pub id: i64,
@@ -109,7 +110,7 @@ pub struct TradeRow {
 }
 
 /// Optional filters for [`TradeReader::list_trades`]. Empty-string / `None`
-/// means "no filter". Mirror of `tradectl_live::trade_db::TradeFilter`.
+/// means "no filter". Mirror of `tradectl_trade_db::TradeFilter`.
 #[derive(Debug, Default, Clone)]
 pub struct TradeFilter {
     pub strategy: Option<String>,
@@ -126,7 +127,7 @@ pub struct TradeFilter {
 }
 
 /// One page of rows from [`TradeReader::list_trades`]. Mirror of
-/// `tradectl_live::trade_db::TradePage`.
+/// `tradectl_trade_db::TradePage`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradePage {
     pub rows: Vec<TradeRow>,
@@ -166,7 +167,7 @@ impl std::error::Error for TradeReaderError {}
 
 /// Read-only access to a bot's persisted, closed-trade history.
 ///
-/// Implemented in `tradectl-live` for `TradeDBReader` (rusqlite, WAL-mode
+/// Implemented in `tradectl-trade-db` for `TradeDBReader` (rusqlite, WAL-mode
 /// read connection). The implementation converts its native row/filter/page
 /// types into the wire mirrors defined above at the call boundary.
 pub trait TradeReader: Send + Sync {
@@ -218,8 +219,8 @@ pub struct StatusInfo {
 /// Read-only access to a bot's identity + uptime + counts.
 ///
 /// Not implemented for `BotState` directly, because `name`/`version` are
-/// owned by the runner rather than the shared state. `tradectl-live`
-/// provides a thin wrapper that pairs an `Arc<BotState>` with those two
+/// owned by the runner rather than the shared state. `tradectl-core`
+/// (`bot_state_api.rs`) provides a thin wrapper that pairs an `Arc<BotState>` with those two
 /// strings.
 pub trait StatusReader: Send + Sync {
     fn status_info(&self) -> StatusInfo;
@@ -283,7 +284,7 @@ impl Default for StatsResponse {
 }
 
 /// Read-only access to server-side aggregated trade statistics over a time
-/// window. Implemented in `tradectl-live` over the same `TradeDBReader` that
+/// window. Implemented in `tradectl-trade-db` over the same `TradeDBReader` that
 /// backs [`TradeReader`]; the aggregation runs in SQLite. `mode` filters by
 /// `paper`/`live`; `None` aggregates across all modes (matching `/v1/trades`).
 /// `side` filters by trade direction (`LONG`/`SHORT`); `None` aggregates both.
