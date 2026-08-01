@@ -2,10 +2,11 @@
 //!
 //! `TradeReader` and `PositionReader` decouple any read-only consumer (the
 //! `tradectl-bot-api` HTTP crate, MCP tools, future exporters) from the
-//! concrete data sources that live inside `tradectl-trade-db`
-//! (`TradeDBReader` over rusqlite, `BotState` over `RwLock`). A consumer
-//! depending on these traits never touches `rusqlite` or any exchange
-//! adapter.
+//! concrete data sources behind them: `TradeDBReader` over rusqlite, which
+//! lives in `tradectl-trade-db`, and `BotState` over `RwLock`, which lives in
+//! this crate (`bot_state.rs` — it implements `PositionReader` directly). A
+//! consumer depending on these traits never touches `rusqlite` or any
+//! exchange adapter.
 //!
 //! ## Type-movement note (v0.1.14)
 //!
@@ -18,7 +19,7 @@
 //!
 //! So instead this module defines **wire-shape mirror structs** with fields
 //! identical to the `tradectl-trade-db` originals. `tradectl-trade-db` owns the
-//! `From` conversions at the boundary (see `trade_db.rs`). The mirrors
+//! `From` conversions at the boundary (see `trade-db/src/lib.rs`). The mirrors
 //! derive `serde` so an HTTP layer can serialize them straight onto the
 //! wire as the REST response body without inventing a third parallel type.
 
