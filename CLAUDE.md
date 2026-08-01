@@ -17,7 +17,7 @@ Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit ca
 
 | Feature | Adds | Used By |
 |---------|------|---------|
-| `monitor` | tokio-tungstenite, futures-util, tokio/net+rt+macros | plugins/live (default) |
+| `monitor` | tokio-tungstenite, futures-util, tokio/net+rt+macros | engine/core (default) |
 | `runner` | clap | CLI dispatch |
 
 Default: none.
