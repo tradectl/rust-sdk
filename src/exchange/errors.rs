@@ -1,5 +1,28 @@
 use std::fmt;
 
+use crate::types::MarketType;
+
+/// Which venue's numeric error space a response body belongs to.
+///
+/// A raw `{"code":-2021,...}` is meaningless without knowing who sent it and
+/// from which market. Binance splits its space by market type — the same
+/// number carries different meanings on futures and Spot (`-2021` is "order
+/// would immediately trigger" on USD-M/COIN-M but a cancel-replace partial
+/// failure on Spot) — so the market must travel with the body all the way
+/// into classification.
+///
+/// Venues that classify their own codes (OKX's `classify_okx_code`, Bybit's
+/// `retCode` wrapper, HTX's `err-code`) never route through the Binance table:
+/// they pass `Other`, which falls back to message inspection only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeSpace {
+    /// Binance, in a specific market's code space.
+    Binance(MarketType),
+    /// A venue whose numeric codes this table does not describe. Message
+    /// keywords only — never the Binance code table.
+    Other,
+}
+
 /// Classified exchange API error.
 ///
 /// Parsed from exchange error responses (e.g. Binance `{"code":-2013,"msg":"..."}`).
@@ -23,7 +46,7 @@ pub enum ApiErrorKind {
     TriggerImmediate,
     /// -2022: ReduceOnly order rejected (position already closed).
     ReduceOnlyRejected,
-    /// -4197: No need to modify order (same price).
+    /// -4197 (COIN-M) / -5027 (USD-M): No need to modify order (same price).
     SamePrice,
     /// -2019, -1000 w/ margin msg: Insufficient margin/balance.
     InsufficientMargin,
@@ -61,7 +84,7 @@ pub enum ApiErrorKind {
     /// -2027: Exceeded maximum allowable position at current leverage.
     /// Persistent: stops the strategy after repeated failures to prevent API spam.
     MaxPositionExceeded,
-    /// -4164: Order notional below exchange minimum.
+    /// -4164 (USD-M) / -4178 (COIN-M): Order notional below exchange minimum.
     MinNotional,
     /// -1111: Price/quantity precision over the maximum defined for the
     /// symbol. Deterministic — the same request can never succeed. Reaching
@@ -70,12 +93,23 @@ pub enum ApiErrorKind {
     /// strategy instead of retrying, because rejected orders still count
     /// against the account's order-rate limits.
     PrecisionError,
-    /// -4198 (REST) / -5026 (WS API): per-order amendment cap reached. The
+    /// -4198 (COIN-M) / -5026 (USD-M): per-order amendment cap reached. The
     /// order can never be modified again — the runner cancels it and places
     /// a fresh, amendable order.
     ModifyLimitExceeded,
     /// Duplicate client order ID (order already placed with this ID).
     DuplicateOrderId,
+    /// Spot `-2021`: a cancel-replace where exactly ONE leg succeeded. The
+    /// resting order is most likely gone with nothing put back in its place,
+    /// so the amend cannot be treated as a no-op — the caller has to re-read
+    /// order state. Spot-only: on USD-M/COIN-M this same number means
+    /// `TriggerImmediate`, which is why classification is keyed by market.
+    CancelReplacePartial,
+    /// Spot `-2022`: a cancel-replace where BOTH legs failed. The original
+    /// order is still resting, so nothing was lost — but the amend did not
+    /// happen and the caller must not assume the new price took effect.
+    /// Spot-only: on USD-M/COIN-M this number means `ReduceOnlyRejected`.
+    CancelReplaceFailed,
     /// -1003: Too many requests (rate limit hit).
     RateLimited,
     /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
@@ -93,7 +127,12 @@ impl ExchangeApiError {
     ///
     /// Tries to extract `{"code":-XXXX,"msg":"..."}` (Binance format).
     /// Falls back to Unknown if the body is not structured JSON.
-    pub fn from_response(http_status: u16, body: &str, endpoint: String) -> Self {
+    pub fn from_response(
+        http_status: u16,
+        body: &str,
+        endpoint: String,
+        space: CodeSpace,
+    ) -> Self {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             if let (Some(code), Some(msg)) = (v["code"].as_i64(), v["msg"].as_str()) {
                 let code = code as i32;
@@ -101,7 +140,7 @@ impl ExchangeApiError {
                 let kind = if http_status == 418 && msg.to_lowercase().contains("banned") {
                     ApiErrorKind::IpBanned
                 } else {
-                    classify_code(code, msg)
+                    classify_code(code, msg, space)
                 };
                 return Self { kind, code, message: msg.to_string(), endpoint, http_status };
             }
@@ -241,12 +280,46 @@ impl ExchangeApiError {
     }
 }
 
-fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
+fn classify_code(code: i32, msg: &str, space: CodeSpace) -> ApiErrorKind {
+    match space {
+        CodeSpace::Binance(market) => classify_binance(code, msg, market),
+        // No numeric table for this venue — the code is not ours to read.
+        // Message keywords are the only safe signal.
+        CodeSpace::Other => classify_by_message(msg),
+    }
+}
+
+/// Binance's numeric space, resolved against the market the response came from.
+///
+/// Two classes of code live here:
+///
+/// 1. **Conflicting** — the same number means different things per market.
+///    These MUST be resolved before the shared table, and are the entire
+///    reason `CodeSpace` carries a `MarketType`. Today that is Spot's
+///    `-2021`/`-2022` (cancel-replace outcomes) against futures'
+///    `TriggerImmediate`/`ReduceOnlyRejected`.
+/// 2. **Disjoint** — USD-M and COIN-M number the same condition differently
+///    (`-4164`/`-4178` min-notional, `-5027`/`-4197` same-price,
+///    `-5026`/`-4198` amend cap). Those numbers never collide, so the shared
+///    table below accepts both spellings on any futures market. Gating them
+///    per-market would buy no correctness and would reject valid fixtures.
+fn classify_binance(code: i32, msg: &str, market: MarketType) -> ApiErrorKind {
+    // (1) Conflicting codes — market decides the meaning.
+    if market == MarketType::Spot {
+        match code {
+            -2021 => return ApiErrorKind::CancelReplacePartial,
+            -2022 => return ApiErrorKind::CancelReplaceFailed,
+            _ => {}
+        }
+    }
+
+    // (2) Shared table.
     match code {
         -2013 | -2011 => ApiErrorKind::OrderNotFound,
         -2021 => ApiErrorKind::TriggerImmediate,
         -2022 => ApiErrorKind::ReduceOnlyRejected,
-        -4197 => ApiErrorKind::SamePrice,
+        // -4197 COIN-M / -5027 USD-M: "No need to modify the order."
+        -4197 | -5027 => ApiErrorKind::SamePrice,
         -2019 => ApiErrorKind::InsufficientMargin,
         -2015 => ApiErrorKind::Unauthorized,
         -2014 | -1022 => ApiErrorKind::AuthRejected,
@@ -255,40 +328,46 @@ fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
         -1015 => ApiErrorKind::TooManyOrders,
         -4005 => ApiErrorKind::QuantityExceeded,
         -2027 => ApiErrorKind::MaxPositionExceeded,
-        -4164 => ApiErrorKind::MinNotional,
+        // -4164 USD-M / -4178 COIN-M: order notional below the venue minimum.
+        -4164 | -4178 => ApiErrorKind::MinNotional,
         -1111 => ApiErrorKind::PrecisionError,
+        // -4198 COIN-M / -5026 USD-M: per-order amendment cap reached.
         -4198 | -5026 => ApiErrorKind::ModifyLimitExceeded,
         -1003 => ApiErrorKind::RateLimited,
         -1112 => ApiErrorKind::DuplicateOrderId,
-        _ => {
-            let lower = msg.to_lowercase();
-            if lower.contains("duplicate") {
-                ApiErrorKind::DuplicateOrderId
-            } else if lower.contains("insufficient")
-                || lower.contains("margin")
-                || lower.contains("not enough")
-                || lower.contains("balance")
-                || lower.contains("exceeds")
-                || lower.contains("funds")
-            {
-                ApiErrorKind::InsufficientMargin
-            } else if lower.contains("api-key")
-                || lower.contains("apikey")
-                || lower.contains("api key")
-                || lower.contains("signature")
-            {
-                // Auth rejection on an order (bad/empty key, bad signature)
-                // that didn't carry a mapped code — persistent (strategy
-                // self-halt), not account-fatal.
-                ApiErrorKind::AuthRejected
-            } else if lower.contains("position side") {
-                // -4061 worded without its code (e.g. a differently-wrapped
-                // WS API error) → still an account position-mode mismatch.
-                ApiErrorKind::PositionModeMismatch
-            } else {
-                ApiErrorKind::Unknown
-            }
-        }
+        _ => classify_by_message(msg),
+    }
+}
+
+/// Last-resort classification for a code this table does not describe —
+/// an unmapped Binance code, or any code from a venue with no table at all.
+fn classify_by_message(msg: &str) -> ApiErrorKind {
+    let lower = msg.to_lowercase();
+    if lower.contains("duplicate") {
+        ApiErrorKind::DuplicateOrderId
+    } else if lower.contains("insufficient")
+        || lower.contains("margin")
+        || lower.contains("not enough")
+        || lower.contains("balance")
+        || lower.contains("exceeds")
+        || lower.contains("funds")
+    {
+        ApiErrorKind::InsufficientMargin
+    } else if lower.contains("api-key")
+        || lower.contains("apikey")
+        || lower.contains("api key")
+        || lower.contains("signature")
+    {
+        // Auth rejection on an order (bad/empty key, bad signature)
+        // that didn't carry a mapped code — persistent (strategy
+        // self-halt), not account-fatal.
+        ApiErrorKind::AuthRejected
+    } else if lower.contains("position side") {
+        // -4061 worded without its code (e.g. a differently-wrapped
+        // WS API error) → still an account position-mode mismatch.
+        ApiErrorKind::PositionModeMismatch
+    } else {
+        ApiErrorKind::Unknown
     }
 }
 
@@ -313,10 +392,140 @@ pub fn classify<'a>(err: &'a (dyn std::error::Error + Send + Sync + 'static)) ->
 mod tests {
     use super::*;
 
+    /// Classify a Binance body in the USD-M space. Every pre-existing test
+    /// used the (then market-blind) Binance table, so USD-M is the faithful
+    /// stand-in; the codes whose meaning actually depends on the market get
+    /// their own explicit-market tests below.
+    fn binance_err(http_status: u16, body: &str, endpoint: &str) -> ExchangeApiError {
+        ExchangeApiError::from_response(
+            http_status,
+            body,
+            endpoint.to_string(),
+            CodeSpace::Binance(MarketType::Linear),
+        )
+    }
+
+    fn classify_at(code: i32, msg: &str, space: CodeSpace) -> ApiErrorKind {
+        let body = serde_json::json!({ "code": code, "msg": msg }).to_string();
+        ExchangeApiError::from_response(400, &body, "POST /order".into(), space).kind
+    }
+
+    /// The reason `CodeSpace` carries a market at all: -2021/-2022 are
+    /// "would immediately trigger" / "reduceOnly rejected" on futures, but
+    /// cancel-replace outcomes on Spot. Before keying, a failed Spot amend
+    /// classified as a silent futures condition and was swallowed whole.
+    #[test]
+    fn conflicting_codes_resolve_by_market() {
+        for futures in [MarketType::Linear, MarketType::Inverse] {
+            let space = CodeSpace::Binance(futures);
+            assert_eq!(
+                classify_at(-2021, "Order would immediately trigger.", space),
+                ApiErrorKind::TriggerImmediate,
+                "{futures:?} -2021",
+            );
+            assert_eq!(
+                classify_at(-2022, "ReduceOnly Order is rejected.", space),
+                ApiErrorKind::ReduceOnlyRejected,
+                "{futures:?} -2022",
+            );
+        }
+
+        let spot = CodeSpace::Binance(MarketType::Spot);
+        assert_eq!(
+            classify_at(-2021, "Order cancel-replace partially failed.", spot),
+            ApiErrorKind::CancelReplacePartial,
+        );
+        assert_eq!(
+            classify_at(-2022, "Order cancel-replace failed.", spot),
+            ApiErrorKind::CancelReplaceFailed,
+        );
+    }
+
+    /// Both cancel-replace outcomes must reach the operator. The pre-keying
+    /// mapping put them on `TriggerImmediate`/`ReduceOnlyRejected`, both of
+    /// which are silent — so a Spot order could vanish with no alert.
+    #[test]
+    fn spot_cancel_replace_failures_are_never_silent() {
+        for (code, kind) in [
+            (-2021, ApiErrorKind::CancelReplacePartial),
+            (-2022, ApiErrorKind::CancelReplaceFailed),
+        ] {
+            let err = ExchangeApiError::from_response(
+                400,
+                &serde_json::json!({ "code": code, "msg": "cancel-replace" }).to_string(),
+                "POST /api/v3/order/cancelReplace".into(),
+                CodeSpace::Binance(MarketType::Spot),
+            );
+            assert_eq!(err.kind, kind);
+            assert!(!err.is_silent(), "{code} must alert");
+            assert!(!err.is_retryable(), "{code} must not be blindly retried");
+            assert!(!err.is_fatal());
+            assert!(!err.is_persistent());
+        }
+    }
+
+    /// USD-M and COIN-M spell the same condition with different numbers.
+    /// These never collide, so both spellings resolve on either futures
+    /// market rather than being gated behind the exact one.
+    #[test]
+    fn disjoint_usdm_and_coinm_spellings_both_resolve() {
+        for market in [MarketType::Linear, MarketType::Inverse] {
+            let space = CodeSpace::Binance(market);
+            // min notional: -4164 USD-M, -4178 COIN-M
+            assert_eq!(classify_at(-4164, "notional", space), ApiErrorKind::MinNotional);
+            assert_eq!(classify_at(-4178, "notional", space), ApiErrorKind::MinNotional);
+            // same price: -5027 USD-M, -4197 COIN-M
+            assert_eq!(classify_at(-5027, "no need to modify", space), ApiErrorKind::SamePrice);
+            assert_eq!(classify_at(-4197, "no need to modify", space), ApiErrorKind::SamePrice);
+            // amend cap: -5026 USD-M, -4198 COIN-M
+            assert_eq!(
+                classify_at(-5026, "exceed modify limit", space),
+                ApiErrorKind::ModifyLimitExceeded,
+            );
+            assert_eq!(
+                classify_at(-4198, "exceed modify limit", space),
+                ApiErrorKind::ModifyLimitExceeded,
+            );
+        }
+    }
+
+    /// A venue with its own table (OKX, Bybit, HTX, …) must never be read
+    /// through Binance's numbers. Only message keywords may apply.
+    #[test]
+    fn other_venues_never_use_the_binance_table() {
+        // -2013 is "order does not exist" on Binance and nothing here.
+        assert_eq!(
+            classify_at(-2013, "some other venue wording", CodeSpace::Other),
+            ApiErrorKind::Unknown,
+        );
+        // -2015 is account-fatal on Binance; it must not stop a bot on a
+        // venue where that number means something else entirely.
+        assert_eq!(
+            classify_at(-2015, "unrelated condition", CodeSpace::Other),
+            ApiErrorKind::Unknown,
+        );
+        // Message fallback still applies — that part is venue-agnostic.
+        assert_eq!(
+            classify_at(51008, "Order placement failed due to insufficient balance", CodeSpace::Other),
+            ApiErrorKind::InsufficientMargin,
+        );
+    }
+
+    /// IP-ban detection keys off HTTP 418 + wording, not the numeric table,
+    /// so it must survive on a venue with no table.
+    #[test]
+    fn ip_ban_detection_is_space_agnostic() {
+        let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
+        for space in [CodeSpace::Binance(MarketType::Linear), CodeSpace::Other] {
+            let err = ExchangeApiError::from_response(418, body, "GET /ping".into(), space);
+            assert_eq!(err.kind, ApiErrorKind::IpBanned, "{space:?}");
+        }
+    }
+
     #[test]
     fn parse_binance_error() {
         let body = r#"{"code":-2013,"msg":"Order does not exist."}"#;
-        let err = ExchangeApiError::from_response(400, body, "GET /fapi/v1/order".into());
+        let err = binance_err(400, body, "GET /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::OrderNotFound);
         assert_eq!(err.code, -2013);
         assert!(!err.is_fatal());
@@ -326,7 +535,7 @@ mod tests {
     #[test]
     fn parse_fatal_error() {
         let body = r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"#;
-        let err = ExchangeApiError::from_response(403, body, "POST /fapi/v1/order".into());
+        let err = binance_err(403, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::Unauthorized);
         assert!(err.is_fatal());
         assert_eq!(err.fatal_reason(), Some("invalid API key or IP not whitelisted"));
@@ -337,7 +546,7 @@ mod tests {
         // -2014 (the 2026-07-18 emu→live storm): a live order rejected for a
         // malformed/empty key must self-halt the STRATEGY (persistent breaker),
         // NOT stop the whole bot (account-fatal) — paper siblings keep running.
-        let err = ExchangeApiError::from_response(
+        let err = binance_err(
             401,
             r#"{"code":-2014,"msg":"API-key format invalid."}"#,
             "POST /dapi/v1/order".into(),
@@ -352,14 +561,14 @@ mod tests {
     #[test]
     fn signature_error_and_message_fallback_are_auth_rejected() {
         // Mapped code -1022.
-        let sig = ExchangeApiError::from_response(
+        let sig = binance_err(
             400,
             r#"{"code":-1022,"msg":"Signature for this request is not valid."}"#,
             "POST /dapi/v1/order".into(),
         );
         assert_eq!(sig.kind, ApiErrorKind::AuthRejected);
         // Unmapped code but auth-worded message → still AuthRejected via fallback.
-        let fallback = ExchangeApiError::from_response(
+        let fallback = binance_err(
             401,
             r#"{"code":-9999,"msg":"Invalid Api-Key format supplied."}"#,
             "POST /dapi/v1/order".into(),
@@ -370,7 +579,7 @@ mod tests {
 
     #[test]
     fn unauthorized_is_account_fatal_not_symbol_fatal() {
-        let err = ExchangeApiError::from_response(
+        let err = binance_err(
             403,
             r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"#,
             "POST /fapi/v1/order".into(),
@@ -383,7 +592,7 @@ mod tests {
 
     #[test]
     fn symbol_not_trading_is_symbol_fatal_not_account_fatal() {
-        let err = ExchangeApiError::from_response(
+        let err = binance_err(
             400,
             r#"{"code":-4199,"msg":"Symbol is not in trading status."}"#,
             "POST /fapi/v1/order".into(),
@@ -402,7 +611,7 @@ mod tests {
         // order of every strategy is rejected deterministically. It must stop
         // the whole bot on the first occurrence — not retry, not per-symbol,
         // not per-strategy — because only an operator account change clears it.
-        let err = ExchangeApiError::from_response(
+        let err = binance_err(
             400,
             r#"{"code":-4061,"msg":"Order's position side does not match user's setting."}"#,
             "POST /dapi/v1/order".into(),
@@ -416,7 +625,7 @@ mod tests {
         assert!(!err.is_silent(), "operator must be alerted");
         assert!(err.fatal_reason().is_some());
         // Message fallback: -4061 worded without its code still classifies.
-        let fallback = ExchangeApiError::from_response(
+        let fallback = binance_err(
             400,
             r#"{"code":-9999,"msg":"Order's position side does not match user's setting."}"#,
             "POST /dapi/v1/order".into(),
@@ -427,7 +636,7 @@ mod tests {
     #[test]
     fn parse_margin_error() {
         let body = r#"{"code":-2019,"msg":"Margin is insufficient."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
         assert!(err.is_margin());
         assert!(err.is_recoverable(), "margin is recoverable");
@@ -438,7 +647,7 @@ mod tests {
     #[test]
     fn parse_unknown_code_with_margin_message() {
         let body = r#"{"code":-9876,"msg":"Not enough balance for this operation"}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
         assert!(err.is_margin());
         assert!(err.is_recoverable());
@@ -454,7 +663,7 @@ mod tests {
         // retrying forever: rejected orders still count against the
         // account's order-rate limits and starve every other symbol.
         let body = r#"{"code":-1111,"msg":"Precision is over the maximum defined for this asset."}"#;
-        let err = ExchangeApiError::from_response(400, body, "WS order.place".into());
+        let err = binance_err(400, body, "WS order.place".into());
         assert_eq!(err.kind, ApiErrorKind::PrecisionError);
         assert!(err.is_persistent(), "-1111 must trip the persistent breaker");
         assert!(!err.is_recoverable(), "retrying the same request cannot succeed");
@@ -469,14 +678,14 @@ mod tests {
         // Code-based classification must win even if the message happens to
         // contain a keyword-fallback trigger word like "exceeds".
         let body = r#"{"code":-1111,"msg":"Precision exceeds the maximum for this asset."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::PrecisionError);
         assert!(err.is_persistent());
     }
 
     #[test]
     fn parse_unstructured_error() {
-        let err = ExchangeApiError::from_response(500, "Internal Server Error", "GET /fapi/v1/ping".into());
+        let err = binance_err(500, "Internal Server Error", "GET /fapi/v1/ping".into());
         assert_eq!(err.kind, ApiErrorKind::Unknown);
         assert_eq!(err.code, -500);
     }
@@ -491,7 +700,7 @@ mod tests {
     #[test]
     fn retryable_errors() {
         let body = r#"{"code":-1003,"msg":"Too many requests."}"#;
-        let err = ExchangeApiError::from_response(429, body, "GET /fapi/v1/order".into());
+        let err = binance_err(429, body, "GET /fapi/v1/order".into());
         assert!(err.is_retryable());
         assert!(!err.is_fatal());
     }
@@ -499,7 +708,7 @@ mod tests {
     #[test]
     fn ip_banned_is_silent_not_retryable() {
         let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
-        let err = ExchangeApiError::from_response(418, body, "GET /dapi/v1/ping".into());
+        let err = binance_err(418, body, "GET /dapi/v1/ping".into());
         assert_eq!(err.kind, ApiErrorKind::IpBanned);
         assert!(err.is_ip_banned());
         assert!(err.is_silent());
@@ -511,7 +720,7 @@ mod tests {
     fn rate_limited_1003_not_ip_ban_on_429() {
         // Same code -1003 but HTTP 429 (not 418) = regular rate limit, not ban
         let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
-        let err = ExchangeApiError::from_response(429, body, "GET /dapi/v1/ping".into());
+        let err = binance_err(429, body, "GET /dapi/v1/ping".into());
         assert_eq!(err.kind, ApiErrorKind::RateLimited);
         assert!(!err.is_fatal());
         assert!(err.is_retryable());
@@ -520,7 +729,7 @@ mod tests {
     #[test]
     fn parse_quantity_exceeded() {
         let body = r#"{"code":-4005,"msg":"Quantity greater than max quantity."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::QuantityExceeded);
         assert!(err.is_persistent());
         assert!(!err.is_fatal());
@@ -529,7 +738,7 @@ mod tests {
 
     #[test]
     fn persistent_excludes_margin_but_covers_quantity() {
-        let margin = ExchangeApiError::from_response(
+        let margin = binance_err(
             400,
             r#"{"code":-2019,"msg":"Margin is insufficient."}"#,
             "POST /fapi/v1/order".into(),
@@ -538,7 +747,7 @@ mod tests {
         assert!(margin.is_recoverable());
         assert!(margin.is_margin());
 
-        let qty = ExchangeApiError::from_response(
+        let qty = binance_err(
             400,
             r#"{"code":-4005,"msg":"Quantity greater than max quantity."}"#,
             "POST /fapi/v1/order".into(),
@@ -551,7 +760,7 @@ mod tests {
     #[test]
     fn parse_modify_limit_exceeded() {
         let body = r#"{"code":-4198,"msg":"Exceed maximum modify order limit."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order/amend".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order/amend".into());
         assert_eq!(err.kind, ApiErrorKind::ModifyLimitExceeded);
         assert!(err.is_modify_limit_exceeded());
         // Cancel+replace is the only handling: it must not be silenced,
@@ -568,7 +777,7 @@ mod tests {
         // Same amendment-cap condition as -4198, but reported as -5026 by
         // the WS API (`order.modify`) — the path live edits actually take.
         let body = r#"{"code":-5026,"msg":"Exceed maximum modify order limit."}"#;
-        let err = ExchangeApiError::from_response(400, body, "WS order.modify".into());
+        let err = binance_err(400, body, "WS order.modify".into());
         assert_eq!(err.kind, ApiErrorKind::ModifyLimitExceeded);
         assert!(err.is_modify_limit_exceeded());
         assert!(!err.is_silent());
@@ -581,7 +790,7 @@ mod tests {
     #[test]
     fn parse_min_notional() {
         let body = r#"{"code":-4164,"msg":"Order's notional must be no smaller than 5 (unless you choose reduce only)."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
+        let err = binance_err(400, body, "POST /fapi/v1/order".into());
         assert_eq!(err.kind, ApiErrorKind::MinNotional);
         assert!(err.is_persistent());
         assert!(!err.is_fatal());
@@ -590,7 +799,7 @@ mod tests {
     #[test]
     fn display_format() {
         let body = r#"{"code":-2013,"msg":"Order does not exist."}"#;
-        let err = ExchangeApiError::from_response(400, body, "GET /fapi/v1/order".into());
+        let err = binance_err(400, body, "GET /fapi/v1/order".into());
         let s = err.to_string();
         assert!(s.contains("GET /fapi/v1/order"));
         assert!(s.contains("400"));
