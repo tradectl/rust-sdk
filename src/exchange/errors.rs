@@ -108,23 +108,23 @@ pub enum ApiErrorKind {
 }
 
 impl ExchangeApiError {
-    /// Parse an exchange error response body into a typed error, without
-    /// interpreting the venue's numeric code.
+    /// Parse an error body from a venue whose code space we do not have.
     ///
-    /// A number like `-2021` means nothing without knowing who sent it, so
-    /// this venue-agnostic path keeps the code for reporting and classifies
-    /// by message alone. An adapter that knows its own code space classifies
-    /// there and builds `ExchangeApiError` directly — see
-    /// `binance::parse_binance_error` and `okx::parse_okx_error`.
+    /// Keeps the venue's code and message for logs and alerts, but claims no
+    /// meaning for either: `kind` is always `Unknown`. A number like `-2021`
+    /// means nothing without knowing who sent it, and the wording means little
+    /// more — every other kind carries a runner behaviour, up to halting the
+    /// account, which is too much to hang on a substring match.
     ///
-    /// Falls back to Unknown if the body is not structured JSON.
-    pub fn from_response(http_status: u16, body: &str, endpoint: String) -> Self {
+    /// A venue that knows its own numbers classifies there and builds
+    /// `ExchangeApiError` directly — see `binance::parse_binance_error`,
+    /// `okx::parse_okx_error` and `bybit::classify_bybit_code`.
+    pub fn unclassified(http_status: u16, body: &str, endpoint: String) -> Self {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             if let (Some(code), Some(msg)) = (v["code"].as_i64(), v["msg"].as_str()) {
-                let code = code as i32;
                 return Self {
-                    kind: classify_by_message(msg),
-                    code,
+                    kind: ApiErrorKind::Unknown,
+                    code: code as i32,
                     message: msg.to_string(),
                     endpoint,
                     http_status,
@@ -266,42 +266,6 @@ impl ExchangeApiError {
     }
 }
 
-/// Venue-agnostic classification from the error message alone.
-///
-/// The fallback for a code no table describes — an unmapped code inside a
-/// venue's own classifier, or any code from a venue with no table at all.
-/// Deliberately conservative: it returns `Unknown` unless the wording is
-/// unambiguous, because every kind it can return carries a runner behaviour.
-pub fn classify_by_message(msg: &str) -> ApiErrorKind {
-    let lower = msg.to_lowercase();
-    if lower.contains("duplicate") {
-        ApiErrorKind::DuplicateOrderId
-    } else if lower.contains("insufficient")
-        || lower.contains("margin")
-        || lower.contains("not enough")
-        || lower.contains("balance")
-        || lower.contains("exceeds")
-        || lower.contains("funds")
-    {
-        ApiErrorKind::InsufficientMargin
-    } else if lower.contains("api-key")
-        || lower.contains("apikey")
-        || lower.contains("api key")
-        || lower.contains("signature")
-    {
-        // Auth rejection on an order (bad/empty key, bad signature)
-        // that didn't carry a mapped code — persistent (strategy
-        // self-halt), not account-fatal.
-        ApiErrorKind::AuthRejected
-    } else if lower.contains("position side") {
-        // -4061 worded without its code (e.g. a differently-wrapped
-        // WS API error) → still an account position-mode mismatch.
-        ApiErrorKind::PositionModeMismatch
-    } else {
-        ApiErrorKind::Unknown
-    }
-}
-
 impl fmt::Display for ExchangeApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -324,12 +288,13 @@ pub fn classify<'a>(err: &'a (dyn std::error::Error + Send + Sync + 'static)) ->
 mod tests {
     use super::*;
 
-    /// The venue-agnostic parser must NOT read the number. The same body that
-    /// means "order does not exist" on Binance carries no such promise from a
-    /// venue whose space we do not have — classification falls to the message.
+    /// Without a code table there is nothing to read. The same body that means
+    /// "order does not exist" on Binance carries no such promise from a venue
+    /// whose space we do not have, so the number is kept for reporting and
+    /// nothing is inferred from it.
     #[test]
-    fn from_response_never_interprets_the_numeric_code() {
-        let err = ExchangeApiError::from_response(
+    fn unclassified_never_interprets_the_numeric_code() {
+        let err = ExchangeApiError::unclassified(
             400,
             r#"{"code":-2013,"msg":"some venue wording"}"#,
             "GET /order".into(),
@@ -339,7 +304,7 @@ mod tests {
 
         // -2015 is account-fatal on Binance. Arriving from an unknown space it
         // must not stop the bot.
-        let err = ExchangeApiError::from_response(
+        let err = ExchangeApiError::unclassified(
             403,
             r#"{"code":-2015,"msg":"unrelated condition"}"#,
             "POST /order".into(),
@@ -347,23 +312,29 @@ mod tests {
         assert!(!err.is_fatal(), "an uninterpreted code can never be fatal");
     }
 
+    /// Wording is not classification. Every kind but `Unknown` carries a runner
+    /// behaviour — cancelling entries, halting a strategy, halting the account —
+    /// and these messages all used to reach one by substring match.
     #[test]
-    fn message_keywords_classify_without_a_code_table() {
-        for (msg, want) in [
-            ("Not enough balance for this operation", ApiErrorKind::InsufficientMargin),
-            ("Duplicate order sent.", ApiErrorKind::DuplicateOrderId),
-            ("Invalid Api-Key format supplied.", ApiErrorKind::AuthRejected),
-            ("Signature for this request is not valid.", ApiErrorKind::AuthRejected),
-            ("Order's position side does not match user's setting.", ApiErrorKind::PositionModeMismatch),
-            ("something entirely unremarkable", ApiErrorKind::Unknown),
+    fn message_wording_is_never_classified() {
+        for msg in [
+            "Not enough balance for this operation",
+            "Duplicate order sent.",
+            "Invalid Api-Key format supplied.",
+            "Signature for this request is not valid.",
+            "Order's position side does not match user's setting.",
+            "something entirely unremarkable",
         ] {
-            assert_eq!(classify_by_message(msg), want, "{msg:?}");
+            let body = serde_json::json!({ "code": -9999, "msg": msg }).to_string();
+            let err = ExchangeApiError::unclassified(400, &body, "POST /order".into());
+            assert_eq!(err.kind, ApiErrorKind::Unknown, "{msg:?}");
+            assert_eq!(err.message, msg, "the wording is still reported");
         }
     }
 
     #[test]
     fn parse_unstructured_error() {
-        let err = ExchangeApiError::from_response(500, "Internal Server Error", "GET /ping".into());
+        let err = ExchangeApiError::unclassified(500, "Internal Server Error", "GET /ping".into());
         assert_eq!(err.kind, ApiErrorKind::Unknown);
         assert_eq!(err.code, -500);
     }
@@ -385,7 +356,7 @@ mod tests {
 
     #[test]
     fn display_format() {
-        let err = ExchangeApiError::from_response(
+        let err = ExchangeApiError::unclassified(
             400,
             r#"{"code":-2013,"msg":"Order does not exist."}"#,
             "GET /fapi/v1/order".into(),
