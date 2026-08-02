@@ -305,8 +305,8 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | `Amend` | ModifyLimitExceeded | cancel + place fresh |
 | `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded, InvalidRequest, NoDepth | 3-in-60s breaker → stop strategy |
 | `Resource` | InsufficientMargin | cancel entry + 60s pause; second strike stops |
-| `Gate` | AccountRestricted, SymbolRestricted | entries refused locally, exits keep flowing |
-| `Symbol` | SymbolNotTrading, SymbolClosed | stop that symbol's task |
+| `Gate` | AccountRestricted, SymbolRestricted, SymbolNotTrading | entries refused locally, exits keep flowing; a trading halt is a pause, not a delisting |
+| `Symbol` | SymbolClosed | stop that symbol's task |
 | `Account` | Unauthorized, PositionModeMismatch | stop the bot |
 | `Auth` | AuthRejected | breaker → stop strategy, siblings live |
 | `Benign` | OrderNotFound, TriggerImmediate, ReduceOnlyRejected, SamePrice, DuplicateOrderId | release the slot, no alert |
@@ -320,6 +320,16 @@ Derived predicates: `is_retryable()` = `Retry`, `is_recoverable()` = `Resource`,
 disagree with `is_fatal()`.
 
 `ExchangeApiError::unclassified(status, body, endpoint)` parses an error body from a venue whose code space is not mapped: it reports the code and message and always yields `Unknown`. Venues that know their own numbers classify beside their adapter (`binance::parse_binance_error`, `okx::parse_okx_error`, `bybit::parse_bybit_error`) — the SDK owns the kinds and predicates, never a venue's codes.
+
+Three more constructors, for errors that never pass through a response parser:
+
+| Constructor | For | Kind |
+|---|---|---|
+| `rejected(code, msg, endpoint)` | a rejection the venue reports inside an HTTP **200** — OKX `sCode`, HTX/Bitget envelope `code`, Hyperliquid `error`. The transport layer sees success, so the error parser never runs | `Unknown` |
+| `local(msg, endpoint)` | the adapter could not build the request: missing `PairInfo`, unknown asset index, absent leverage bracket. No venue involved | `InvalidRequest` (persistent) |
+| `network` / `parse` | transport failure, and a body that would not deserialize | `Network` / `ParseError` |
+
+**Every error an adapter returns must be an `ExchangeApiError`.** `ExchangeError` is `Box<dyn Error>`, so `format!("...").into()` compiles — and the runner's `classify_err` is a downcast, so such an error reaches *no* mechanism: not a kind, not the `Unknown` policy, not the persistent-error breaker. `engine/exchange/tests/error_classification.rs` walks the venue tree and fails on that shape, covering new adapter directories automatically.
 
 ## Config Types
 

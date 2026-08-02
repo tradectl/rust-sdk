@@ -47,7 +47,11 @@ pub enum ApiErrorKind {
     /// incident: a paper strategy switched to live on a keyless bot placed
     /// 470 rejected orders in ~2 min before it was stopped by hand.
     AuthRejected,
-    /// -4199: Symbol is not in trading status (FATAL).
+    /// -4199 (COIN-M) / -5024 (USD-M): the symbol is not in trading status
+    /// right now, reported from an amend. A pause, not a delisting: the order
+    /// still rests and the halt clears, so this gates the symbol's entries
+    /// rather than killing its task. A genuine delisting arrives as
+    /// [`SymbolClosed`](Self::SymbolClosed).
     SymbolNotTrading,
     /// -4061: "Order's position side does not match user's setting" — the
     /// account's Binance position mode (one-way vs hedge/dual-side) disagrees
@@ -297,9 +301,15 @@ impl ApiErrorKind {
 
             Self::InsufficientMargin => Behaviour::Resource,
 
-            Self::AccountRestricted | Self::SymbolRestricted => Behaviour::Gate,
+            // SymbolNotTrading is Gate, not Symbol: a halt is a pause. It
+            // fires from an amend on a resting order — killing the task for
+            // it orphans that order, and the halt clears while a stopped
+            // task does not (BINANCE-ERRORS.md §5 finding 5).
+            Self::AccountRestricted | Self::SymbolRestricted | Self::SymbolNotTrading => {
+                Behaviour::Gate
+            }
 
-            Self::SymbolNotTrading | Self::SymbolClosed => Behaviour::Symbol,
+            Self::SymbolClosed => Behaviour::Symbol,
 
             Self::Unauthorized | Self::PositionModeMismatch => Behaviour::Account,
 
@@ -396,7 +406,8 @@ impl ExchangeApiError {
                     message: msg.to_string(),
                     endpoint,
                     http_status,
-                };
+                }
+                .logged();
             }
         }
         Self {
@@ -406,6 +417,52 @@ impl ExchangeApiError {
             endpoint,
             http_status,
         }
+        .logged()
+    }
+
+    /// A rejection the venue reported inside a **successful** HTTP response.
+    ///
+    /// Several venues answer `200 OK` with a per-order status in the payload —
+    /// OKX's `sCode`, HTX's and Bitget's `code`, Hyperliquid's `error` string.
+    /// The transport layer sees a success and never calls the error parser, so
+    /// without this the rejection reaches the runner as a bare string, and a
+    /// bare string downcasts to nothing: not a kind, not the Unknown policy,
+    /// not the breaker. It is the same order rejection either way — only the
+    /// envelope differs.
+    ///
+    /// `Unknown` like [`unclassified`](Self::unclassified), and for the same
+    /// reason: this constructor is for venues with no table of their own. One
+    /// that knows its numbers classifies them and builds the error directly.
+    pub fn rejected(code: i32, message: impl fmt::Display, endpoint: String) -> Self {
+        Self {
+            kind: ApiErrorKind::Unknown,
+            code,
+            message: message.to_string(),
+            endpoint,
+            http_status: 200,
+        }
+        .logged()
+    }
+
+    /// The adapter could not build the request — no venue was involved.
+    ///
+    /// A missing `PairInfo`, an unknown asset index, an absent leverage
+    /// bracket. `InvalidRequest`, so it is `Bug`-class and persistent: these
+    /// do not clear by being asked again, and a strategy that keeps asking
+    /// burns the account's shared order-rate budget on requests that cannot
+    /// succeed. That is the 2026-07-17 SOXS shape — a new listing with no
+    /// `PairInfo` looping on raw quantities until both bots were gated for
+    /// eight hours — so the breaker stopping the strategy after three in a
+    /// minute is the intended outcome, not a regrettable one.
+    pub fn local(message: impl fmt::Display, endpoint: String) -> Self {
+        Self {
+            kind: ApiErrorKind::InvalidRequest,
+            code: 0,
+            message: message.to_string(),
+            endpoint,
+            http_status: 0,
+        }
+        .logged()
     }
 
     /// Create from a network/transport error.
@@ -417,6 +474,7 @@ impl ExchangeApiError {
             endpoint,
             http_status: 0,
         }
+        .logged()
     }
 
     /// Create from a deserialization error.
@@ -428,6 +486,7 @@ impl ExchangeApiError {
             endpoint,
             http_status,
         }
+        .logged()
     }
 
     /// Fatal errors that should stop trading. Use `is_account_fatal()` /
@@ -449,9 +508,9 @@ impl ExchangeApiError {
         self.behaviour() == Behaviour::Account
     }
 
-    /// Symbol-level fatal: the affected symbol is halted/delisted (`-4199`),
-    /// but the account and every sibling symbol are unaffected. The runner
-    /// stops only that symbol's task — it must NOT broadcast a global shutdown.
+    /// Symbol-level fatal: the affected symbol is delisted (`-4141`), but the
+    /// account and every sibling symbol are unaffected. The runner stops only
+    /// that symbol's task — it must NOT broadcast a global shutdown.
     pub fn is_symbol_fatal(&self) -> bool {
         self.behaviour() == Behaviour::Symbol
     }
@@ -476,7 +535,6 @@ impl ExchangeApiError {
                 _ => "the account cannot trade",
             }),
             Behaviour::Symbol => Some(match self.kind {
-                ApiErrorKind::SymbolNotTrading => "symbol not in trading status",
                 ApiErrorKind::SymbolClosed => "symbol is closed or delisted",
                 _ => "symbol cannot be traded",
             }),
@@ -543,6 +601,35 @@ impl ExchangeApiError {
     /// `IpBanned`: retrying extends the ban.
     pub fn is_retryable(&self) -> bool {
         self.behaviour() == Behaviour::Retry
+    }
+
+    /// The audit line for the code → kind → behaviour mapping, one per error
+    /// occurrence. Census: `grep -F '[decision]' bot.log | sort | uniq -c`.
+    pub fn decision_line(&self) -> String {
+        format!(
+            "[decision] [{}] {:?} → {:?} on {} (HTTP {}): {}",
+            self.code, self.kind, self.behaviour(), self.endpoint, self.http_status, self.message
+        )
+    }
+
+    /// Emit [`decision_line`](Self::decision_line) and return `self`, so the
+    /// line records every classified error exactly once — including ones a
+    /// handler later absorbs silently.
+    ///
+    /// Called only where the error is BUILT: this crate's constructors and
+    /// each venue's parse fn (`engine/exchange` pins that with a source scan).
+    /// Locally-synthesized errors that carry no venue code under audit
+    /// (paper's `OrderNotFound`, the api-limit gate refusal) stay unlogged.
+    /// `Network`/`ParseError` log at debug — transport failures, not mapping
+    /// decisions, and routine during connectivity blips.
+    pub fn logged(self) -> Self {
+        match self.kind {
+            ApiErrorKind::Network | ApiErrorKind::ParseError => {
+                log::debug!("{}", self.decision_line())
+            }
+            _ => log::info!("{}", self.decision_line()),
+        }
+        self
     }
 }
 
@@ -666,7 +753,7 @@ mod tests {
         assert!(acct.is_fatal() && acct.is_account_fatal() && !acct.is_symbol_fatal());
         assert!(acct.fatal_reason().is_some());
 
-        let sym = kind(ApiErrorKind::SymbolNotTrading);
+        let sym = kind(ApiErrorKind::SymbolClosed);
         assert!(sym.is_fatal() && sym.is_symbol_fatal() && !sym.is_account_fatal());
         assert!(sym.fatal_reason().is_some());
 
@@ -791,22 +878,22 @@ mod tests {
         assert!(!e.is_retryable(), "nothing we send makes a book appear");
     }
 
-    /// A closed symbol and a refused amend are both `Symbol`-scoped, but only
-    /// one of them will ever clear — worth separate kinds so the message the
-    /// operator reads is true.
+    /// A closed symbol and a refused amend used to share `Symbol`, which made
+    /// a temporary halt kill the symbol task and orphan its resting order.
+    /// Only the delisting is fatal; the halt gates.
     #[test]
-    fn a_closed_symbol_stops_that_symbol_alone() {
-        for k in [ApiErrorKind::SymbolClosed, ApiErrorKind::SymbolNotTrading] {
-            let e = kind(k);
-            assert!(e.is_symbol_fatal(), "{k:?}");
-            assert!(!e.is_account_fatal(), "{k:?} must not stop the whole bot");
-            assert!(e.fatal_reason().is_some(), "{k:?}");
-        }
-        assert_ne!(
-            kind(ApiErrorKind::SymbolClosed).fatal_reason(),
-            kind(ApiErrorKind::SymbolNotTrading).fatal_reason(),
-            "a delisting and a refused amend must not read the same",
-        );
+    fn a_closed_symbol_stops_that_symbol_alone_but_a_halt_only_gates() {
+        let closed = kind(ApiErrorKind::SymbolClosed);
+        assert!(closed.is_symbol_fatal());
+        assert!(!closed.is_account_fatal(), "must not stop the whole bot");
+        assert!(closed.fatal_reason().is_some());
+
+        let halted = kind(ApiErrorKind::SymbolNotTrading);
+        assert_eq!(halted.behaviour(), Behaviour::Gate, "a halt is a pause, not a death");
+        assert!(!halted.is_fatal(), "killing the task orphans the resting order");
+        assert!(halted.fatal_reason().is_none());
+        assert!(!halted.is_retryable() && !halted.is_persistent());
+        assert!(!halted.is_silent(), "the operator still hears about the halt");
     }
 
     /// A reduce-only order bigger than the position means our view of the
@@ -861,7 +948,7 @@ mod tests {
             (Behaviour::Amend, ApiErrorKind::ModifyLimitExceeded),
             (Behaviour::Bug, ApiErrorKind::PrecisionError),
             (Behaviour::Resource, ApiErrorKind::InsufficientMargin),
-            (Behaviour::Symbol, ApiErrorKind::SymbolNotTrading),
+            (Behaviour::Symbol, ApiErrorKind::SymbolClosed),
             (Behaviour::Account, ApiErrorKind::Unauthorized),
             (Behaviour::Auth, ApiErrorKind::AuthRejected),
             (Behaviour::Benign, ApiErrorKind::OrderNotFound),
@@ -914,5 +1001,23 @@ mod tests {
             assert!(!e.is_fatal() && !e.is_persistent() && !e.is_recoverable(), "{k:?}");
             assert!(!e.is_silent(), "{k:?} must reach the operator");
         }
+    }
+
+    /// The audit line's shape is what post-hoc census greps key on — code,
+    /// kind and behaviour in fixed positions.
+    #[test]
+    fn the_decision_line_is_stable_and_greppable() {
+        let e = ExchangeApiError {
+            kind: ApiErrorKind::InsufficientMargin,
+            code: -2019,
+            message: "Margin is insufficient.".into(),
+            endpoint: "POST /fapi/v1/order".into(),
+            http_status: 400,
+        };
+        assert_eq!(
+            e.decision_line(),
+            "[decision] [-2019] InsufficientMargin → Resource on POST /fapi/v1/order \
+             (HTTP 400): Margin is insufficient."
+        );
     }
 }
