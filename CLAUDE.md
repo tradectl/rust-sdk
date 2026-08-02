@@ -299,12 +299,13 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | Behaviour | Kinds | Runner mechanism |
 |---|---|---|
 | `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
-| `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed | read the order back before deciding |
-| `Rate` | TooManyOrders, IpBanned | `ApiLimitTracker` / ban-duration pause |
+| `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed, PositionNotSufficient | read the order back before deciding |
+| `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause |
 | `Amend` | ModifyLimitExceeded | cancel + place fresh |
-| `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded | 3-in-60s breaker → stop strategy |
+| `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded, InvalidRequest, NoDepth | 3-in-60s breaker → stop strategy |
 | `Resource` | InsufficientMargin | cancel entry + 60s pause; second strike stops |
-| `Symbol` | SymbolNotTrading | stop that symbol's task |
+| `Gate` | AccountRestricted, SymbolRestricted | entries refused locally, exits keep flowing |
+| `Symbol` | SymbolNotTrading, SymbolClosed | stop that symbol's task |
 | `Account` | Unauthorized, PositionModeMismatch | stop the bot |
 | `Auth` | AuthRejected | breaker → stop strategy, siblings live |
 | `Benign` | OrderNotFound, TriggerImmediate, ReduceOnlyRejected, SamePrice, DuplicateOrderId | release the slot, no alert |
