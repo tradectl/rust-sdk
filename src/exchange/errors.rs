@@ -406,7 +406,8 @@ impl ExchangeApiError {
                     message: msg.to_string(),
                     endpoint,
                     http_status,
-                };
+                }
+                .logged();
             }
         }
         Self {
@@ -416,6 +417,7 @@ impl ExchangeApiError {
             endpoint,
             http_status,
         }
+        .logged()
     }
 
     /// A rejection the venue reported inside a **successful** HTTP response.
@@ -439,6 +441,7 @@ impl ExchangeApiError {
             endpoint,
             http_status: 200,
         }
+        .logged()
     }
 
     /// The adapter could not build the request — no venue was involved.
@@ -459,6 +462,7 @@ impl ExchangeApiError {
             endpoint,
             http_status: 0,
         }
+        .logged()
     }
 
     /// Create from a network/transport error.
@@ -470,6 +474,7 @@ impl ExchangeApiError {
             endpoint,
             http_status: 0,
         }
+        .logged()
     }
 
     /// Create from a deserialization error.
@@ -481,6 +486,7 @@ impl ExchangeApiError {
             endpoint,
             http_status,
         }
+        .logged()
     }
 
     /// Fatal errors that should stop trading. Use `is_account_fatal()` /
@@ -595,6 +601,35 @@ impl ExchangeApiError {
     /// `IpBanned`: retrying extends the ban.
     pub fn is_retryable(&self) -> bool {
         self.behaviour() == Behaviour::Retry
+    }
+
+    /// The audit line for the code → kind → behaviour mapping, one per error
+    /// occurrence. Census: `grep -F '[decision]' bot.log | sort | uniq -c`.
+    pub fn decision_line(&self) -> String {
+        format!(
+            "[decision] [{}] {:?} → {:?} on {} (HTTP {}): {}",
+            self.code, self.kind, self.behaviour(), self.endpoint, self.http_status, self.message
+        )
+    }
+
+    /// Emit [`decision_line`](Self::decision_line) and return `self`, so the
+    /// line records every classified error exactly once — including ones a
+    /// handler later absorbs silently.
+    ///
+    /// Called only where the error is BUILT: this crate's constructors and
+    /// each venue's parse fn (`engine/exchange` pins that with a source scan).
+    /// Locally-synthesized errors that carry no venue code under audit
+    /// (paper's `OrderNotFound`, the api-limit gate refusal) stay unlogged.
+    /// `Network`/`ParseError` log at debug — transport failures, not mapping
+    /// decisions, and routine during connectivity blips.
+    pub fn logged(self) -> Self {
+        match self.kind {
+            ApiErrorKind::Network | ApiErrorKind::ParseError => {
+                log::debug!("{}", self.decision_line())
+            }
+            _ => log::info!("{}", self.decision_line()),
+        }
+        self
     }
 }
 
@@ -966,5 +1001,23 @@ mod tests {
             assert!(!e.is_fatal() && !e.is_persistent() && !e.is_recoverable(), "{k:?}");
             assert!(!e.is_silent(), "{k:?} must reach the operator");
         }
+    }
+
+    /// The audit line's shape is what post-hoc census greps key on — code,
+    /// kind and behaviour in fixed positions.
+    #[test]
+    fn the_decision_line_is_stable_and_greppable() {
+        let e = ExchangeApiError {
+            kind: ApiErrorKind::InsufficientMargin,
+            code: -2019,
+            message: "Margin is insufficient.".into(),
+            endpoint: "POST /fapi/v1/order".into(),
+            http_status: 400,
+        };
+        assert_eq!(
+            e.decision_line(),
+            "[decision] [-2019] InsufficientMargin → Resource on POST /fapi/v1/order \
+             (HTTP 400): Margin is insufficient."
+        );
     }
 }
