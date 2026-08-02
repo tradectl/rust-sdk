@@ -99,6 +99,63 @@ pub enum ApiErrorKind {
     RateLimited,
     /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
     IpBanned,
+    /// A deterministic defect in the request we built: a filter violation, a
+    /// malformed parameter, an illegal flag combination, an endpoint that no
+    /// longer exists. Distinct from `PrecisionError` and `MinNotional` only in
+    /// that those name a specific cause worth reading in an alert; the
+    /// behaviour is the same, and one kind carrying the venue's own code and
+    /// wording beats a kind per code.
+    ///
+    /// The same bytes can never succeed, so it is never retried and it feeds
+    /// the breaker: a rejected order still costs the account's order-rate
+    /// budget.
+    InvalidRequest,
+    /// Binance `-1112` NO_DEPTH, `-5041` no BBO: the book is empty on the side
+    /// we are trying to trade. A new listing, a halt, or a contract thin
+    /// enough to have no resting liquidity.
+    ///
+    /// Not `Benign` and emphatically not `DuplicateOrderId`, which is where
+    /// `-1112` used to land — that made an empty book silent, so a strategy
+    /// could hammer one with no alert and no bound. It is transient in
+    /// principle, but nothing we do makes it clear, and the venue charges us
+    /// for every attempt; so the breaker owns it, as it does the rest of
+    /// `Bug`, and the operator is told.
+    NoDepth,
+    /// The venue-side cap on resting orders for the symbol or account is
+    /// full (`-2025` max open orders, `-4045` max stop orders). Retrying
+    /// cannot succeed until one of them leaves the book, so the rate
+    /// mechanism owns it, not the retry loop.
+    MaxOpenOrders,
+    /// `-2024`: a reduce-only order larger than the position it would close.
+    /// The position we believe in and the one the venue has disagree, so the
+    /// answer is to re-read it and resize — not to retry the same size, and
+    /// not to stop.
+    PositionNotSufficient,
+    /// The whole account is restricted from opening new exposure but can
+    /// still reduce: liquidation mode (`-2023`), reduce-only restriction
+    /// (`-4189`), a cooling-off period (`-4192`), quantitative rules
+    /// (`-4400`/`-4401`).
+    ///
+    /// Neither fatal nor persistent, deliberately. Stopping the strategy
+    /// would abandon the exits an open position still needs; retrying is the
+    /// -2014-storm shape. Entries stop locally, exits keep flowing, and the
+    /// gate re-probes so trading resumes on its own when the restriction
+    /// lifts.
+    AccountRestricted,
+    /// The same condition scoped to one symbol — Binance's position risk
+    /// control (`-4105`..`-4107`).
+    ///
+    /// A separate kind rather than a field, because the runner reads kinds
+    /// and never venue codes: the alternative was `matches!(err.code, -4105
+    /// | -4106 | -4107)` in the runner, which is exactly the coupling the
+    /// classifier exists to prevent. Blocking every symbol because one is
+    /// under risk control would be a real over-reach.
+    SymbolRestricted,
+    /// The symbol is gone, not merely halted: `-4141` SYMBOL_ALREADY_CLOSED,
+    /// `-1122` invalid symbol status, `-4140` invalid status for opening a
+    /// position. Kept separate from `SymbolNotTrading` (an amend refusal,
+    /// which may clear) because a delisting will not.
+    SymbolClosed,
     /// The request may or may not have executed, and the response does not
     /// say which: Binance -1006 UNEXPECTED_RESP (message-bus desync), -1007
     /// TIMEOUT (the backend answered late), HTTP 500 ("execution status
@@ -187,20 +244,25 @@ impl ApiErrorKind {
 
             Self::AmbiguousOutcome
             | Self::CancelReplacePartial
-            | Self::CancelReplaceFailed => Behaviour::Reconcile,
+            | Self::CancelReplaceFailed
+            | Self::PositionNotSufficient => Behaviour::Reconcile,
 
-            Self::TooManyOrders | Self::IpBanned => Behaviour::Rate,
+            Self::TooManyOrders | Self::IpBanned | Self::MaxOpenOrders => Behaviour::Rate,
 
             Self::ModifyLimitExceeded => Behaviour::Amend,
 
             Self::PrecisionError
             | Self::QuantityExceeded
             | Self::MinNotional
-            | Self::MaxPositionExceeded => Behaviour::Bug,
+            | Self::MaxPositionExceeded
+            | Self::InvalidRequest
+            | Self::NoDepth => Behaviour::Bug,
 
             Self::InsufficientMargin => Behaviour::Resource,
 
-            Self::SymbolNotTrading => Behaviour::Symbol,
+            Self::AccountRestricted | Self::SymbolRestricted => Behaviour::Gate,
+
+            Self::SymbolNotTrading | Self::SymbolClosed => Behaviour::Symbol,
 
             Self::Unauthorized | Self::PositionModeMismatch => Behaviour::Account,
 
@@ -237,6 +299,11 @@ impl ApiErrorKind {
             | Self::TooManyOrders
             | Self::IpBanned => true,
 
+            // A full order book cap is the rate mechanism's business and
+            // recurs constantly on a busy account; the operator hears about
+            // it through the pause, not per order.
+            Self::MaxOpenOrders => true,
+
             Self::AmbiguousOutcome
             | Self::ServerBusy
             | Self::Network
@@ -253,6 +320,12 @@ impl ApiErrorKind {
             | Self::Unauthorized
             | Self::PositionModeMismatch
             | Self::AuthRejected
+            | Self::InvalidRequest
+            | Self::NoDepth
+            | Self::PositionNotSufficient
+            | Self::AccountRestricted
+            | Self::SymbolRestricted
+            | Self::SymbolClosed
             | Self::ParseError
             | Self::Unknown => false,
         }
@@ -361,6 +434,7 @@ impl ExchangeApiError {
             }),
             Behaviour::Symbol => Some(match self.kind {
                 ApiErrorKind::SymbolNotTrading => "symbol not in trading status",
+                ApiErrorKind::SymbolClosed => "symbol is closed or delisted",
                 _ => "symbol cannot be traded",
             }),
             _ => None,
@@ -646,6 +720,60 @@ mod tests {
         assert!(!ambiguous.is_fatal() && !ambiguous.is_persistent() && !ambiguous.is_recoverable());
 
         assert!(kind(ApiErrorKind::ServerBusy).is_retryable(), "this one did NOT execute");
+    }
+
+    /// A restricted account still has positions that need their exits.
+    /// Stopping the strategy would abandon them; retrying is the -2014-storm
+    /// shape. Only entries stop, and only locally.
+    #[test]
+    fn a_restricted_account_stops_entries_and_nothing_else() {
+        for k in [ApiErrorKind::AccountRestricted, ApiErrorKind::SymbolRestricted] {
+            let e = kind(k);
+            assert_eq!(e.behaviour(), Behaviour::Gate, "{k:?}");
+            assert!(!e.is_fatal(), "{k:?}: positions still need managing");
+            assert!(!e.is_persistent(), "{k:?}: the breaker would stand the strategy down");
+            assert!(!e.is_retryable(), "{k:?}: this is how -2014 became 470 rejected orders");
+            assert!(!e.is_silent(), "{k:?}: the operator must know the bot stopped opening");
+        }
+    }
+
+    /// -1112 used to be `DuplicateOrderId`, which is silent — so a strategy
+    /// could hammer an empty book with no alert and no bound at all.
+    #[test]
+    fn an_empty_book_is_heard_and_bounded() {
+        let e = kind(ApiErrorKind::NoDepth);
+        assert_eq!(e.behaviour(), Behaviour::Bug);
+        assert!(e.is_persistent(), "the breaker is what bounds it");
+        assert!(!e.is_silent(), "and the operator is told why");
+        assert!(!e.is_retryable(), "nothing we send makes a book appear");
+    }
+
+    /// A closed symbol and a refused amend are both `Symbol`-scoped, but only
+    /// one of them will ever clear — worth separate kinds so the message the
+    /// operator reads is true.
+    #[test]
+    fn a_closed_symbol_stops_that_symbol_alone() {
+        for k in [ApiErrorKind::SymbolClosed, ApiErrorKind::SymbolNotTrading] {
+            let e = kind(k);
+            assert!(e.is_symbol_fatal(), "{k:?}");
+            assert!(!e.is_account_fatal(), "{k:?} must not stop the whole bot");
+            assert!(e.fatal_reason().is_some(), "{k:?}");
+        }
+        assert_ne!(
+            kind(ApiErrorKind::SymbolClosed).fatal_reason(),
+            kind(ApiErrorKind::SymbolNotTrading).fatal_reason(),
+            "a delisting and a refused amend must not read the same",
+        );
+    }
+
+    /// A reduce-only order bigger than the position means our view of the
+    /// position is wrong. Re-reading is the fix; retrying the same size is not.
+    #[test]
+    fn a_short_position_is_reconciled_not_retried() {
+        let e = kind(ApiErrorKind::PositionNotSufficient);
+        assert_eq!(e.behaviour(), Behaviour::Reconcile);
+        assert!(!e.is_retryable());
+        assert!(!e.is_persistent(), "an exit path must not stand the strategy down");
     }
 
     /// Every predicate now reads one exhaustive `behaviour()`, so a kind
