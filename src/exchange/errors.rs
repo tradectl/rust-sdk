@@ -2,9 +2,12 @@ use std::fmt;
 
 /// Classified exchange API error.
 ///
-/// Parsed from exchange error responses (e.g. Binance `{"code":-2013,"msg":"..."}`).
-/// Provides typed classification for centralized error handling — replaces ad-hoc
-/// string matching with structured variants.
+/// The venue-neutral vocabulary the runner reasons about. Each adapter maps
+/// its own numeric codes into [`ApiErrorKind`] — that mapping is venue-specific
+/// and lives beside the adapter (`binance::parse_binance_error`,
+/// `okx::parse_okx_error`, `bybit::classify_bybit_code`). What lives here is
+/// the taxonomy and the behaviour predicates, so `is_fatal()` means the same
+/// thing whichever venue produced the error.
 #[derive(Debug, Clone)]
 pub struct ExchangeApiError {
     pub kind: ApiErrorKind,
@@ -15,15 +18,20 @@ pub struct ExchangeApiError {
     pub http_status: u16,
 }
 
+/// What went wrong, in terms the runner acts on.
+///
+/// Codes cited below are Binance's, as the venue these were first derived
+/// from — they are illustrative, not definitional. Every adapter maps its own
+/// space onto these kinds, and the same kind can arrive from any venue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiErrorKind {
-    /// -2013/-2011: Order does not exist (already filled/canceled).
+    /// e.g. Binance -2013/-2011: Order does not exist (already filled/canceled).
     OrderNotFound,
     /// -2021: Conditional order (stop/TP/SL) would trigger immediately.
     TriggerImmediate,
     /// -2022: ReduceOnly order rejected (position already closed).
     ReduceOnlyRejected,
-    /// -4197: No need to modify order (same price).
+    /// -4197 (COIN-M) / -5027 (USD-M): No need to modify order (same price).
     SamePrice,
     /// -2019, -1000 w/ margin msg: Insufficient margin/balance.
     InsufficientMargin,
@@ -61,7 +69,7 @@ pub enum ApiErrorKind {
     /// -2027: Exceeded maximum allowable position at current leverage.
     /// Persistent: stops the strategy after repeated failures to prevent API spam.
     MaxPositionExceeded,
-    /// -4164: Order notional below exchange minimum.
+    /// -4164 (USD-M) / -4178 (COIN-M): Order notional below exchange minimum.
     MinNotional,
     /// -1111: Price/quantity precision over the maximum defined for the
     /// symbol. Deterministic — the same request can never succeed. Reaching
@@ -70,12 +78,23 @@ pub enum ApiErrorKind {
     /// strategy instead of retrying, because rejected orders still count
     /// against the account's order-rate limits.
     PrecisionError,
-    /// -4198 (REST) / -5026 (WS API): per-order amendment cap reached. The
+    /// -4198 (COIN-M) / -5026 (USD-M): per-order amendment cap reached. The
     /// order can never be modified again — the runner cancels it and places
     /// a fresh, amendable order.
     ModifyLimitExceeded,
     /// Duplicate client order ID (order already placed with this ID).
     DuplicateOrderId,
+    /// Spot `-2021`: a cancel-replace where exactly ONE leg succeeded. The
+    /// resting order is most likely gone with nothing put back in its place,
+    /// so the amend cannot be treated as a no-op — the caller has to re-read
+    /// order state. Spot-only: on USD-M/COIN-M this same number means
+    /// `TriggerImmediate`, which is why classification is keyed by market.
+    CancelReplacePartial,
+    /// Spot `-2022`: a cancel-replace where BOTH legs failed. The original
+    /// order is still resting, so nothing was lost — but the amend did not
+    /// happen and the caller must not assume the new price took effect.
+    /// Spot-only: on USD-M/COIN-M this number means `ReduceOnlyRejected`.
+    CancelReplaceFailed,
     /// -1003: Too many requests (rate limit hit).
     RateLimited,
     /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
@@ -89,21 +108,27 @@ pub enum ApiErrorKind {
 }
 
 impl ExchangeApiError {
-    /// Parse an exchange error response body into a typed error.
+    /// Parse an error body from a venue whose code space we do not have.
     ///
-    /// Tries to extract `{"code":-XXXX,"msg":"..."}` (Binance format).
-    /// Falls back to Unknown if the body is not structured JSON.
-    pub fn from_response(http_status: u16, body: &str, endpoint: String) -> Self {
+    /// Keeps the venue's code and message for logs and alerts, but claims no
+    /// meaning for either: `kind` is always `Unknown`. A number like `-2021`
+    /// means nothing without knowing who sent it, and the wording means little
+    /// more — every other kind carries a runner behaviour, up to halting the
+    /// account, which is too much to hang on a substring match.
+    ///
+    /// A venue that knows its own numbers classifies there and builds
+    /// `ExchangeApiError` directly — see `binance::parse_binance_error`,
+    /// `okx::parse_okx_error` and `bybit::classify_bybit_code`.
+    pub fn unclassified(http_status: u16, body: &str, endpoint: String) -> Self {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             if let (Some(code), Some(msg)) = (v["code"].as_i64(), v["msg"].as_str()) {
-                let code = code as i32;
-                // HTTP 418 + "banned" = IP ban (not just rate limit)
-                let kind = if http_status == 418 && msg.to_lowercase().contains("banned") {
-                    ApiErrorKind::IpBanned
-                } else {
-                    classify_code(code, msg)
+                return Self {
+                    kind: ApiErrorKind::Unknown,
+                    code: code as i32,
+                    message: msg.to_string(),
+                    endpoint,
+                    http_status,
                 };
-                return Self { kind, code, message: msg.to_string(), endpoint, http_status };
             }
         }
         Self {
@@ -163,10 +188,12 @@ impl ExchangeApiError {
         match self.kind {
             ApiErrorKind::Unauthorized => Some("invalid API key or IP not whitelisted"),
             ApiErrorKind::SymbolNotTrading => Some("symbol not in trading status"),
+            // No venue's codes here: any adapter can map to this kind, and the
+            // error's own code and message are printed alongside this string.
             ApiErrorKind::PositionModeMismatch => Some(
                 "account position mode (one-way vs hedge) does not match the bot's config \
-                 — every order is rejected (-4061); align the account's Binance position \
-                 mode with this bot's hedgeMode setting"),
+                 — every order is rejected; align the account's position mode with this \
+                 bot's hedgeMode setting"),
             _ => None,
         }
     }
@@ -241,57 +268,6 @@ impl ExchangeApiError {
     }
 }
 
-fn classify_code(code: i32, msg: &str) -> ApiErrorKind {
-    match code {
-        -2013 | -2011 => ApiErrorKind::OrderNotFound,
-        -2021 => ApiErrorKind::TriggerImmediate,
-        -2022 => ApiErrorKind::ReduceOnlyRejected,
-        -4197 => ApiErrorKind::SamePrice,
-        -2019 => ApiErrorKind::InsufficientMargin,
-        -2015 => ApiErrorKind::Unauthorized,
-        -2014 | -1022 => ApiErrorKind::AuthRejected,
-        -4199 => ApiErrorKind::SymbolNotTrading,
-        -4061 => ApiErrorKind::PositionModeMismatch,
-        -1015 => ApiErrorKind::TooManyOrders,
-        -4005 => ApiErrorKind::QuantityExceeded,
-        -2027 => ApiErrorKind::MaxPositionExceeded,
-        -4164 => ApiErrorKind::MinNotional,
-        -1111 => ApiErrorKind::PrecisionError,
-        -4198 | -5026 => ApiErrorKind::ModifyLimitExceeded,
-        -1003 => ApiErrorKind::RateLimited,
-        -1112 => ApiErrorKind::DuplicateOrderId,
-        _ => {
-            let lower = msg.to_lowercase();
-            if lower.contains("duplicate") {
-                ApiErrorKind::DuplicateOrderId
-            } else if lower.contains("insufficient")
-                || lower.contains("margin")
-                || lower.contains("not enough")
-                || lower.contains("balance")
-                || lower.contains("exceeds")
-                || lower.contains("funds")
-            {
-                ApiErrorKind::InsufficientMargin
-            } else if lower.contains("api-key")
-                || lower.contains("apikey")
-                || lower.contains("api key")
-                || lower.contains("signature")
-            {
-                // Auth rejection on an order (bad/empty key, bad signature)
-                // that didn't carry a mapped code — persistent (strategy
-                // self-halt), not account-fatal.
-                ApiErrorKind::AuthRejected
-            } else if lower.contains("position side") {
-                // -4061 worded without its code (e.g. a differently-wrapped
-                // WS API error) → still an account position-mode mismatch.
-                ApiErrorKind::PositionModeMismatch
-            } else {
-                ApiErrorKind::Unknown
-            }
-        }
-    }
-}
-
 impl fmt::Display for ExchangeApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -309,324 +285,178 @@ pub fn classify<'a>(err: &'a (dyn std::error::Error + Send + Sync + 'static)) ->
     err.downcast_ref::<ExchangeApiError>()
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Without a code table there is nothing to read. The same body that means
+    /// "order does not exist" on Binance carries no such promise from a venue
+    /// whose space we do not have, so the number is kept for reporting and
+    /// nothing is inferred from it.
     #[test]
-    fn parse_binance_error() {
-        let body = r#"{"code":-2013,"msg":"Order does not exist."}"#;
-        let err = ExchangeApiError::from_response(400, body, "GET /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::OrderNotFound);
-        assert_eq!(err.code, -2013);
-        assert!(!err.is_fatal());
-        assert!(err.is_silent());
-    }
-
-    #[test]
-    fn parse_fatal_error() {
-        let body = r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"#;
-        let err = ExchangeApiError::from_response(403, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::Unauthorized);
-        assert!(err.is_fatal());
-        assert_eq!(err.fatal_reason(), Some("invalid API key or IP not whitelisted"));
-    }
-
-    #[test]
-    fn order_auth_rejection_is_persistent_not_fatal() {
-        // -2014 (the 2026-07-18 emu→live storm): a live order rejected for a
-        // malformed/empty key must self-halt the STRATEGY (persistent breaker),
-        // NOT stop the whole bot (account-fatal) — paper siblings keep running.
-        let err = ExchangeApiError::from_response(
-            401,
-            r#"{"code":-2014,"msg":"API-key format invalid."}"#,
-            "POST /dapi/v1/order".into(),
-        );
-        assert_eq!(err.kind, ApiErrorKind::AuthRejected);
-        assert!(err.is_persistent(), "auth-rejected orders feed the 3-in-60s breaker");
-        assert!(!err.is_fatal(), "must not stop the whole bot");
-        assert!(!err.is_account_fatal());
-        assert!(!err.is_retryable(), "retrying with the same bad key just spams");
-    }
-
-    #[test]
-    fn signature_error_and_message_fallback_are_auth_rejected() {
-        // Mapped code -1022.
-        let sig = ExchangeApiError::from_response(
+    fn unclassified_never_interprets_the_numeric_code() {
+        let err = ExchangeApiError::unclassified(
             400,
-            r#"{"code":-1022,"msg":"Signature for this request is not valid."}"#,
-            "POST /dapi/v1/order".into(),
+            r#"{"code":-2013,"msg":"some venue wording"}"#,
+            "GET /order".into(),
         );
-        assert_eq!(sig.kind, ApiErrorKind::AuthRejected);
-        // Unmapped code but auth-worded message → still AuthRejected via fallback.
-        let fallback = ExchangeApiError::from_response(
-            401,
-            r#"{"code":-9999,"msg":"Invalid Api-Key format supplied."}"#,
-            "POST /dapi/v1/order".into(),
-        );
-        assert_eq!(fallback.kind, ApiErrorKind::AuthRejected);
-        assert!(fallback.is_persistent());
-    }
+        assert_eq!(err.kind, ApiErrorKind::Unknown, "the number must not be read");
+        assert_eq!(err.code, -2013, "but it is kept for reporting");
 
-    #[test]
-    fn unauthorized_is_account_fatal_not_symbol_fatal() {
-        let err = ExchangeApiError::from_response(
+        // -2015 is account-fatal on Binance. Arriving from an unknown space it
+        // must not stop the bot.
+        let err = ExchangeApiError::unclassified(
             403,
-            r#"{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"#,
-            "POST /fapi/v1/order".into(),
+            r#"{"code":-2015,"msg":"unrelated condition"}"#,
+            "POST /order".into(),
         );
-        assert_eq!(err.kind, ApiErrorKind::Unauthorized);
-        assert!(err.is_fatal());
-        assert!(err.is_account_fatal(), "bad key/IP must stop the whole bot");
-        assert!(!err.is_symbol_fatal());
+        assert!(!err.is_fatal(), "an uninterpreted code can never be fatal");
     }
 
+    /// Wording is not classification. Every kind but `Unknown` carries a runner
+    /// behaviour — cancelling entries, halting a strategy, halting the account —
+    /// and these messages all used to reach one by substring match.
     #[test]
-    fn symbol_not_trading_is_symbol_fatal_not_account_fatal() {
-        let err = ExchangeApiError::from_response(
-            400,
-            r#"{"code":-4199,"msg":"Symbol is not in trading status."}"#,
-            "POST /fapi/v1/order".into(),
-        );
-        assert_eq!(err.kind, ApiErrorKind::SymbolNotTrading);
-        assert!(err.is_fatal());
-        assert!(err.is_symbol_fatal(), "a halted symbol must stop only that symbol");
-        assert!(!err.is_account_fatal(), "a halted symbol must NOT stop the whole bot");
-        assert_eq!(err.fatal_reason(), Some("symbol not in trading status"));
-    }
-
-    #[test]
-    fn position_mode_mismatch_is_account_fatal() {
-        // -4061 (the 2026-07-18 COIN-M v0.2.1 storm): the account's position
-        // mode (one-way vs hedge) disagrees with what the bot sends, so EVERY
-        // order of every strategy is rejected deterministically. It must stop
-        // the whole bot on the first occurrence — not retry, not per-symbol,
-        // not per-strategy — because only an operator account change clears it.
-        let err = ExchangeApiError::from_response(
-            400,
-            r#"{"code":-4061,"msg":"Order's position side does not match user's setting."}"#,
-            "POST /dapi/v1/order".into(),
-        );
-        assert_eq!(err.kind, ApiErrorKind::PositionModeMismatch);
-        assert!(err.is_fatal());
-        assert!(err.is_account_fatal(), "-4061 must stop the whole bot");
-        assert!(!err.is_symbol_fatal());
-        assert!(!err.is_persistent(), "account-fatal, not the per-strategy breaker");
-        assert!(!err.is_retryable(), "retrying against a mismatched mode just spams -4061");
-        assert!(!err.is_silent(), "operator must be alerted");
-        assert!(err.fatal_reason().is_some());
-        // Message fallback: -4061 worded without its code still classifies.
-        let fallback = ExchangeApiError::from_response(
-            400,
-            r#"{"code":-9999,"msg":"Order's position side does not match user's setting."}"#,
-            "POST /dapi/v1/order".into(),
-        );
-        assert_eq!(fallback.kind, ApiErrorKind::PositionModeMismatch);
-    }
-
-    #[test]
-    fn parse_margin_error() {
-        let body = r#"{"code":-2019,"msg":"Margin is insufficient."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
-        assert!(err.is_margin());
-        assert!(err.is_recoverable(), "margin is recoverable");
-        assert!(!err.is_persistent(), "margin must NOT be persistent");
-        assert!(!err.is_fatal());
-    }
-
-    #[test]
-    fn parse_unknown_code_with_margin_message() {
-        let body = r#"{"code":-9876,"msg":"Not enough balance for this operation"}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::InsufficientMargin);
-        assert!(err.is_margin());
-        assert!(err.is_recoverable());
-        assert!(!err.is_persistent());
-    }
-
-    #[test]
-    fn parse_precision_error_is_persistent() {
-        // A symbol missing from the pair-info cache gets ordered with an
-        // unrounded quantity. The exchange rejects with -1111
-        // deterministically — the same request can never succeed — so the
-        // persistent-error breaker must stop the strategy instead of
-        // retrying forever: rejected orders still count against the
-        // account's order-rate limits and starve every other symbol.
-        let body = r#"{"code":-1111,"msg":"Precision is over the maximum defined for this asset."}"#;
-        let err = ExchangeApiError::from_response(400, body, "WS order.place".into());
-        assert_eq!(err.kind, ApiErrorKind::PrecisionError);
-        assert!(err.is_persistent(), "-1111 must trip the persistent breaker");
-        assert!(!err.is_recoverable(), "retrying the same request cannot succeed");
-        assert!(!err.is_retryable());
-        assert!(!err.is_fatal());
-        assert!(!err.is_margin());
-        assert!(!err.is_silent(), "operator must see the alert when the breaker trips");
-    }
-
-    #[test]
-    fn precision_error_code_takes_precedence_over_message_keywords() {
-        // Code-based classification must win even if the message happens to
-        // contain a keyword-fallback trigger word like "exceeds".
-        let body = r#"{"code":-1111,"msg":"Precision exceeds the maximum for this asset."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::PrecisionError);
-        assert!(err.is_persistent());
+    fn message_wording_is_never_classified() {
+        for msg in [
+            "Not enough balance for this operation",
+            "Duplicate order sent.",
+            "Invalid Api-Key format supplied.",
+            "Signature for this request is not valid.",
+            "Order's position side does not match user's setting.",
+            "something entirely unremarkable",
+        ] {
+            let body = serde_json::json!({ "code": -9999, "msg": msg }).to_string();
+            let err = ExchangeApiError::unclassified(400, &body, "POST /order".into());
+            assert_eq!(err.kind, ApiErrorKind::Unknown, "{msg:?}");
+            assert_eq!(err.message, msg, "the wording is still reported");
+        }
     }
 
     #[test]
     fn parse_unstructured_error() {
-        let err = ExchangeApiError::from_response(500, "Internal Server Error", "GET /fapi/v1/ping".into());
+        let err = ExchangeApiError::unclassified(500, "Internal Server Error", "GET /ping".into());
         assert_eq!(err.kind, ApiErrorKind::Unknown);
         assert_eq!(err.code, -500);
     }
 
     #[test]
     fn network_error() {
-        let err = ExchangeApiError::network("connection refused", "POST /fapi/v1/order".into());
+        let err = ExchangeApiError::network("connection refused", "POST /order".into());
         assert_eq!(err.kind, ApiErrorKind::Network);
         assert!(err.is_retryable());
     }
 
     #[test]
-    fn retryable_errors() {
-        let body = r#"{"code":-1003,"msg":"Too many requests."}"#;
-        let err = ExchangeApiError::from_response(429, body, "GET /fapi/v1/order".into());
-        assert!(err.is_retryable());
-        assert!(!err.is_fatal());
-    }
-
-    #[test]
-    fn ip_banned_is_silent_not_retryable() {
-        let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
-        let err = ExchangeApiError::from_response(418, body, "GET /dapi/v1/ping".into());
-        assert_eq!(err.kind, ApiErrorKind::IpBanned);
-        assert!(err.is_ip_banned());
-        assert!(err.is_silent());
-        assert!(!err.is_fatal());
+    fn parse_error_is_its_own_kind() {
+        let err = ExchangeApiError::parse("expected value", "GET /order".into(), 200);
+        assert_eq!(err.kind, ApiErrorKind::ParseError);
         assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn rate_limited_1003_not_ip_ban_on_429() {
-        // Same code -1003 but HTTP 429 (not 418) = regular rate limit, not ban
-        let body = r#"{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until 1774784983833."}"#;
-        let err = ExchangeApiError::from_response(429, body, "GET /dapi/v1/ping".into());
-        assert_eq!(err.kind, ApiErrorKind::RateLimited);
-        assert!(!err.is_fatal());
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn parse_quantity_exceeded() {
-        let body = r#"{"code":-4005,"msg":"Quantity greater than max quantity."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::QuantityExceeded);
-        assert!(err.is_persistent());
-        assert!(!err.is_fatal());
-        assert!(!err.is_margin());
-    }
-
-    #[test]
-    fn persistent_excludes_margin_but_covers_quantity() {
-        let margin = ExchangeApiError::from_response(
-            400,
-            r#"{"code":-2019,"msg":"Margin is insufficient."}"#,
-            "POST /fapi/v1/order".into(),
-        );
-        assert!(!margin.is_persistent(), "margin is no longer persistent");
-        assert!(margin.is_recoverable());
-        assert!(margin.is_margin());
-
-        let qty = ExchangeApiError::from_response(
-            400,
-            r#"{"code":-4005,"msg":"Quantity greater than max quantity."}"#,
-            "POST /fapi/v1/order".into(),
-        );
-        assert!(qty.is_persistent());
-        assert!(!qty.is_recoverable());
-        assert!(!qty.is_margin());
-    }
-
-    #[test]
-    fn parse_modify_limit_exceeded() {
-        let body = r#"{"code":-4198,"msg":"Exceed maximum modify order limit."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order/amend".into());
-        assert_eq!(err.kind, ApiErrorKind::ModifyLimitExceeded);
-        assert!(err.is_modify_limit_exceeded());
-        // Cancel+replace is the only handling: it must not be silenced,
-        // retried, stopped (fatal/persistent), or paused (recoverable).
-        assert!(!err.is_silent());
-        assert!(!err.is_retryable());
-        assert!(!err.is_fatal());
-        assert!(!err.is_persistent());
-        assert!(!err.is_recoverable());
-    }
-
-    #[test]
-    fn parse_modify_limit_exceeded_ws_api() {
-        // Same amendment-cap condition as -4198, but reported as -5026 by
-        // the WS API (`order.modify`) — the path live edits actually take.
-        let body = r#"{"code":-5026,"msg":"Exceed maximum modify order limit."}"#;
-        let err = ExchangeApiError::from_response(400, body, "WS order.modify".into());
-        assert_eq!(err.kind, ApiErrorKind::ModifyLimitExceeded);
-        assert!(err.is_modify_limit_exceeded());
-        assert!(!err.is_silent());
-        assert!(!err.is_retryable());
-        assert!(!err.is_fatal());
-        assert!(!err.is_persistent());
-        assert!(!err.is_recoverable());
-    }
-
-    #[test]
-    fn parse_min_notional() {
-        let body = r#"{"code":-4164,"msg":"Order's notional must be no smaller than 5 (unless you choose reduce only)."}"#;
-        let err = ExchangeApiError::from_response(400, body, "POST /fapi/v1/order".into());
-        assert_eq!(err.kind, ApiErrorKind::MinNotional);
-        assert!(err.is_persistent());
         assert!(!err.is_fatal());
     }
 
     #[test]
     fn display_format() {
-        let body = r#"{"code":-2013,"msg":"Order does not exist."}"#;
-        let err = ExchangeApiError::from_response(400, body, "GET /fapi/v1/order".into());
+        let err = ExchangeApiError::unclassified(
+            400,
+            r#"{"code":-2013,"msg":"Order does not exist."}"#,
+            "GET /fapi/v1/order".into(),
+        );
         let s = err.to_string();
         assert!(s.contains("GET /fapi/v1/order"));
         assert!(s.contains("400"));
         assert!(s.contains("-2013"));
     }
 
-    #[test]
-    fn margin_is_recoverable_not_persistent() {
-        let err = ExchangeApiError {
-            kind: ApiErrorKind::InsufficientMargin,
-            code: -2019,
-            message: "Margin is insufficient.".into(),
-            endpoint: "POST /fapi/v1/order".into(),
+    // Behaviour predicates. These are the contract the runner reads, so they
+    // are asserted against kinds directly — no venue, no codes.
+
+    fn kind(kind: ApiErrorKind) -> ExchangeApiError {
+        ExchangeApiError {
+            kind,
+            code: -1,
+            message: "test".into(),
+            endpoint: "test".into(),
             http_status: 400,
-        };
-        assert!(err.is_recoverable(), "margin must classify as recoverable");
-        assert!(!err.is_persistent(), "margin must NOT classify as persistent");
-        assert!(err.is_margin(), "is_margin still true for code-site readers");
+        }
     }
 
     #[test]
-    fn other_persistent_kinds_stay_persistent_and_not_recoverable() {
-        for kind in [
+    fn fatal_scopes_are_disjoint_and_named() {
+        let acct = kind(ApiErrorKind::Unauthorized);
+        assert!(acct.is_fatal() && acct.is_account_fatal() && !acct.is_symbol_fatal());
+        assert!(acct.fatal_reason().is_some());
+
+        let sym = kind(ApiErrorKind::SymbolNotTrading);
+        assert!(sym.is_fatal() && sym.is_symbol_fatal() && !sym.is_account_fatal());
+        assert!(sym.fatal_reason().is_some());
+
+        let mode = kind(ApiErrorKind::PositionModeMismatch);
+        assert!(mode.is_account_fatal(), "a mismatched account mode stops the bot");
+        assert!(!mode.is_persistent(), "account-fatal, not the per-strategy breaker");
+    }
+
+    #[test]
+    fn margin_is_recoverable_and_never_persistent() {
+        let margin = kind(ApiErrorKind::InsufficientMargin);
+        assert!(margin.is_recoverable());
+        assert!(margin.is_margin());
+        assert!(!margin.is_persistent(), "margin frees up on the wall clock");
+    }
+
+    #[test]
+    fn persistent_kinds_are_not_recoverable() {
+        for k in [
             ApiErrorKind::QuantityExceeded,
             ApiErrorKind::MinNotional,
             ApiErrorKind::MaxPositionExceeded,
+            ApiErrorKind::PrecisionError,
+            ApiErrorKind::AuthRejected,
         ] {
-            let err = ExchangeApiError {
-                kind,
-                code: -9999,
-                message: "test".into(),
-                endpoint: "test".into(),
-                http_status: 400,
-            };
-            assert!(err.is_persistent(), "{:?} must remain persistent", kind);
-            assert!(!err.is_recoverable(), "{:?} must NOT be recoverable", kind);
+            assert!(kind(k).is_persistent(), "{k:?} must be persistent");
+            assert!(!kind(k).is_recoverable(), "{k:?} must not be recoverable");
+            assert!(!kind(k).is_retryable(), "{k:?} must not be retried");
         }
+    }
+
+    #[test]
+    fn silent_kinds_are_the_expected_ones() {
+        for k in [
+            ApiErrorKind::OrderNotFound,
+            ApiErrorKind::SamePrice,
+            ApiErrorKind::ReduceOnlyRejected,
+            ApiErrorKind::TriggerImmediate,
+            ApiErrorKind::DuplicateOrderId,
+            ApiErrorKind::TooManyOrders,
+            ApiErrorKind::IpBanned,
+        ] {
+            assert!(kind(k).is_silent(), "{k:?} must not alert");
+        }
+        // A vanished order must always reach the operator.
+        for k in [ApiErrorKind::CancelReplacePartial, ApiErrorKind::CancelReplaceFailed] {
+            assert!(!kind(k).is_silent(), "{k:?} must alert");
+            assert!(!kind(k).is_retryable(), "{k:?} must not be blindly retried");
+        }
+    }
+
+    #[test]
+    fn amend_cap_is_handled_by_cancel_replace_only() {
+        let err = kind(ApiErrorKind::ModifyLimitExceeded);
+        assert!(err.is_modify_limit_exceeded());
+        // Not silenced, retried, stopped, or paused — the runner re-places it.
+        assert!(!err.is_silent());
+        assert!(!err.is_retryable());
+        assert!(!err.is_fatal());
+        assert!(!err.is_persistent());
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn only_network_and_rate_limit_retry() {
+        assert!(kind(ApiErrorKind::Network).is_retryable());
+        assert!(kind(ApiErrorKind::RateLimited).is_retryable());
+        assert!(!kind(ApiErrorKind::IpBanned).is_retryable(), "retrying extends the ban");
+        assert!(!kind(ApiErrorKind::TooManyOrders).is_retryable(), "retrying adds to the overload");
     }
 }

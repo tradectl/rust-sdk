@@ -307,7 +307,7 @@ pub enum ApiErrorKind {
 | `is_silent()` | OrderNotFound, SamePrice, ReduceOnlyRejected, TriggerImmediate, DuplicateOrderId, TooManyOrders, IpBanned | No Telegram alert |
 | `is_margin()` | InsufficientMargin | Specific margin handling |
 
-`ExchangeApiError::from_response(status, body, endpoint)` parses exchange-specific JSON error responses.
+`ExchangeApiError::unclassified(status, body, endpoint)` parses an error body from a venue whose code space is not mapped: it reports the code and message and always yields `Unknown`. Venues that know their own numbers classify beside their adapter (`binance::parse_binance_error`, `okx::parse_okx_error`, `bybit::parse_bybit_error`) — the SDK owns the kinds and predicates, never a venue's codes.
 
 ## Config Types
 
@@ -365,11 +365,11 @@ cargo test                            # ~36 tests (profit, errors, types)
 
 | When X happens... | Y happens | Why it matters |
 |---|---|---|
-| Exchange returns unknown error code (e.g., -9999) | Falls to message inspection: checks for "duplicate", "insufficient", "margin" keywords. If no match: `ApiErrorKind::Unknown` | Graceful downgrade. Message-based fallback prevents crashes |
+| Exchange returns unknown error code (e.g., -9999) | `ApiErrorKind::Unknown`, whatever the message says. The message-keyword fallback was removed — it let an unmapped code reach a kind, and the runner behaviour behind it, on a substring match | A code that needs handling gets a row in its venue's table. There is no fallback; the only message reads left are two per-code discriminators (Binance `-1003` at HTTP 418, Spot `-2010`), each confined to the row that declares it |
 | HTTP 5xx without JSON body | `serde_json::from_str()` fails. Creates Unknown error with `code = -(http_status)` | Network/exchange outages don't crash the parser |
 | HTTP 418 + message contains "banned" | `ApiErrorKind::IpBanned`. `is_silent()=true` (no Telegram). `is_retryable()=false` | IP bans are persistent. Retrying makes it worse |
 | HTTP 429 vs HTTP 418 with same error code | 429 → `RateLimited` (retryable). 418 → `IpBanned` (not retryable). **HTTP status is the differentiator** | Same error code can mean different things depending on HTTP status |
-| Message contains "balance" but code is unrecognized | Classified as `InsufficientMargin` via keyword fallback. `is_recoverable()=true` → cancel resting entry, pause symbol 60 s; second strike escalates to stop | Catches exchange variations that don't use standard codes |
+| Message contains "balance" but code is unrecognized | `Unknown` — no cancel, no pause. Binance's balance/margin codes (-2018/-2019/-2028) are mapped explicitly instead | A venue variation that needs `InsufficientMargin` must be added to that venue's table, where it is reviewable |
 
 ### BotState
 
