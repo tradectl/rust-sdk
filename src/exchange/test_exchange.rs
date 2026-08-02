@@ -520,6 +520,11 @@ impl MarketAdapter for TestExchange {
     }
 
     async fn ping(&self) -> ExchangeResult<u64> { Ok(0) }
+    /// No clock to sync — this adapter signs nothing.
+    async fn resync_clock(&self) -> ExchangeResult<()> {
+        Ok(())
+    }
+
 
     fn on_depth(&self, _symbol: &str, _levels: usize, _cb: DepthCallback) -> CallbackId { 0 }
     fn off_depth(&self, _symbol: &str, _id: CallbackId) {}

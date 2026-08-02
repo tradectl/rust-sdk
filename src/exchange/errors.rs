@@ -156,6 +156,39 @@ pub enum ApiErrorKind {
     /// position. Kept separate from `SymbolNotTrading` (an amend refusal,
     /// which may clear) because a delisting will not.
     SymbolClosed,
+    /// The request's goal is already true, so the venue refused it as a
+    /// no-op: `-4046` margin type unchanged, `-4059` position mode unchanged,
+    /// `-4171` no need to change multi-assets mode.
+    ///
+    /// Not an error to the caller. The `-4046` case was handled by matching
+    /// the code as a SUBSTRING of the error's `Display` output — which also
+    /// matches any message that happens to contain those five characters, and
+    /// nothing else in this file works that way.
+    AlreadyApplied,
+    /// The local clock has drifted outside the venue's `recvWindow`:
+    /// `-1021`, `-5028` / `-4188` (matching-engine recvWindow reject).
+    ///
+    /// Not an order error at all — every signed request fails the same way,
+    /// including the ones that read state. `spawn_time_sync` normally
+    /// prevents it; this is what the runner acts on when that task has died
+    /// or a bad link keeps discarding samples.
+    ClockSkew,
+    /// `-1125`: the user-data listen key no longer exists.
+    ///
+    /// The bot is blind — fills, cancels and liquidations all arrive on that
+    /// stream. This is the condition behind the 2026-06-30 COIN-M incident,
+    /// where a dead stream produced 15 phantom positions before anyone
+    /// noticed, and it classified as nothing at all.
+    ListenKeyDead,
+    /// A leverage or margin-configuration change was refused: the value is
+    /// outside the symbol's bracket, there are open orders or a position, the
+    /// account is in multi-assets mode, and so on.
+    ///
+    /// Consumed only by the `autoAdjustLeverage` path, never on the order
+    /// path. Its whole job is to make a failed clamp say *why* — the -2027
+    /// investigation stalled on "leverage clamp failed" with the venue's
+    /// reason discarded.
+    LeverageRejected,
     /// The request may or may not have executed, and the response does not
     /// say which: Binance -1006 UNEXPECTED_RESP (message-bus desync), -1007
     /// TIMEOUT (the backend answered late), HTTP 500 ("execution status
@@ -240,6 +273,10 @@ impl ApiErrorKind {
     /// `matches!` lists and silently inherited "do nothing".
     pub fn behaviour(self) -> Behaviour {
         match self {
+            Self::AlreadyApplied => Behaviour::Success,
+
+            Self::ClockSkew | Self::ListenKeyDead | Self::LeverageRejected => Behaviour::Health,
+
             Self::ServerBusy | Self::Network | Self::RateLimited => Behaviour::Retry,
 
             Self::AmbiguousOutcome
@@ -297,7 +334,10 @@ impl ApiErrorKind {
             // -1015 and an IP ban are both reported in aggregate by the
             // rate tracker; per-order lines would just be noise.
             | Self::TooManyOrders
-            | Self::IpBanned => true,
+            | Self::IpBanned
+            // The venue refusing a change that is already in effect is not
+            // news; the call site treats it as the success it is.
+            | Self::AlreadyApplied => true,
 
             // A full order book cap is the rate mechanism's business and
             // recurs constantly on a busy account; the operator hears about
@@ -326,6 +366,9 @@ impl ApiErrorKind {
             | Self::AccountRestricted
             | Self::SymbolRestricted
             | Self::SymbolClosed
+            | Self::ClockSkew
+            | Self::ListenKeyDead
+            | Self::LeverageRejected
             | Self::ParseError
             | Self::Unknown => false,
         }
@@ -774,6 +817,36 @@ mod tests {
         assert_eq!(e.behaviour(), Behaviour::Reconcile);
         assert!(!e.is_retryable());
         assert!(!e.is_persistent(), "an exit path must not stand the strategy down");
+    }
+
+    /// A degraded subsystem must never look like an order failure. None of
+    /// these reach the breaker, the margin pause, or a stand-down — they have
+    /// their own repair, and the order path is not involved.
+    #[test]
+    fn health_conditions_never_touch_order_flow() {
+        for k in [
+            ApiErrorKind::ClockSkew,
+            ApiErrorKind::ListenKeyDead,
+            ApiErrorKind::LeverageRejected,
+        ] {
+            let e = kind(k);
+            assert_eq!(e.behaviour(), Behaviour::Health, "{k:?}");
+            assert!(!e.is_fatal(), "{k:?}");
+            assert!(!e.is_persistent(), "{k:?}");
+            assert!(!e.is_recoverable(), "{k:?}");
+            assert!(!e.is_retryable(), "{k:?}: repair first, then the caller may re-ask");
+            assert!(!e.is_silent(), "{k:?}: being blind or out of sync must be heard");
+        }
+    }
+
+    /// The venue refusing a change that is already in effect is the outcome
+    /// the caller wanted.
+    #[test]
+    fn an_already_applied_config_change_is_a_success() {
+        let e = kind(ApiErrorKind::AlreadyApplied);
+        assert_eq!(e.behaviour(), Behaviour::Success);
+        assert!(e.is_silent(), "there is nothing to report");
+        assert!(!e.is_fatal() && !e.is_persistent() && !e.is_retryable());
     }
 
     /// Every predicate now reads one exhaustive `behaviour()`, so a kind
