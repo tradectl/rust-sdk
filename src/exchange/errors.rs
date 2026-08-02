@@ -99,12 +99,149 @@ pub enum ApiErrorKind {
     RateLimited,
     /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
     IpBanned,
+    /// The venue is temporarily unable to serve the request and says so:
+    /// Binance -1001 DISCONNECTED ("Please try again"), -1008 SERVER_BUSY, or
+    /// a 502/503/504 with no JSON body. The request never reached the matching
+    /// engine, so re-sending it is safe and is what the venue asks for. Before
+    /// this kind existed these fell to `Unknown` and were dropped, which is
+    /// how an exit edit could silently not happen during a venue blip.
+    ServerBusy,
     /// Network/transport error (not an API error).
     Network,
     /// Response deserialization error.
     ParseError,
     /// Unknown/unclassified API error code.
     Unknown,
+}
+
+/// What the runner does about a kind — the closed set of behaviours, each with
+/// exactly one owning mechanism.
+///
+/// This exists so that *coverage* is a property of the class, not of the code:
+/// a venue error is handled the moment its code reaches a kind, and adding a
+/// kind without deciding its behaviour does not compile. The behaviour
+/// predicates below (`is_retryable`, `is_persistent`, …) are all derived from
+/// this one exhaustive match, so they cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Behaviour {
+    /// The request's goal is already true. Not an error to the caller.
+    Success,
+    /// Transient; re-send with backoff. The request did not execute.
+    Retry,
+    /// The outcome is unknown — read the order back before deciding anything.
+    /// Never blind-retried: the request may have executed.
+    Reconcile,
+    /// A weight/order budget is exhausted. The rate tracker owns the pause;
+    /// retrying inside it only deepens the hole.
+    Rate,
+    /// The order can no longer be amended. Cancel and place a fresh one.
+    Amend,
+    /// A deterministic defect in the request we built — the same bytes can
+    /// never succeed. Feeds the 3-in-60s breaker, never retried.
+    Bug,
+    /// Not enough margin/balance right now. Cancel, pause, resize.
+    Resource,
+    /// The account or symbol is restricted to reduce-only. Entries stop,
+    /// exits keep flowing.
+    Gate,
+    /// The symbol is halted, closed or delisted. Stop that symbol's task.
+    Symbol,
+    /// The whole account cannot trade. Stop the bot.
+    Account,
+    /// The credential was rejected for this order. Breaker stops the
+    /// strategy; healthy siblings keep running.
+    Auth,
+    /// Expected during normal operation — the request simply did not need to
+    /// happen. Release the slot and move on.
+    Benign,
+    /// Not an order error: a subsystem is degraded (clock, listen key,
+    /// leverage config). Repair it; never touch order flow.
+    Health,
+    /// Unmapped. §4 of `engine/exchange/ERROR-COVERAGE-PLAN.md`: never retried,
+    /// alert throttled, breaker credit on order-mutation paths.
+    Unknown,
+}
+
+impl ApiErrorKind {
+    /// The one place a kind's behaviour is decided.
+    ///
+    /// Deliberately has no `_` arm: a new kind must be given a behaviour here
+    /// or the crate does not build. That is the whole point — before this,
+    /// adding a variant cost zero compile errors across six independent
+    /// `matches!` lists and silently inherited "do nothing".
+    pub fn behaviour(self) -> Behaviour {
+        match self {
+            Self::ServerBusy | Self::Network | Self::RateLimited => Behaviour::Retry,
+
+            Self::CancelReplacePartial | Self::CancelReplaceFailed => Behaviour::Reconcile,
+
+            Self::TooManyOrders | Self::IpBanned => Behaviour::Rate,
+
+            Self::ModifyLimitExceeded => Behaviour::Amend,
+
+            Self::PrecisionError
+            | Self::QuantityExceeded
+            | Self::MinNotional
+            | Self::MaxPositionExceeded => Behaviour::Bug,
+
+            Self::InsufficientMargin => Behaviour::Resource,
+
+            Self::SymbolNotTrading => Behaviour::Symbol,
+
+            Self::Unauthorized | Self::PositionModeMismatch => Behaviour::Account,
+
+            Self::AuthRejected => Behaviour::Auth,
+
+            Self::OrderNotFound
+            | Self::TriggerImmediate
+            | Self::ReduceOnlyRejected
+            | Self::SamePrice
+            | Self::DuplicateOrderId => Behaviour::Benign,
+
+            // A body we could not read tells us nothing, so it gets the
+            // Unknown policy rather than a guess.
+            Self::ParseError | Self::Unknown => Behaviour::Unknown,
+        }
+    }
+
+    /// Whether the operator hears about it.
+    ///
+    /// Orthogonal to [`behaviour`](Self::behaviour) — `Rate` holds both a
+    /// silent kind (`TooManyOrders`, which the tracker already reports in
+    /// aggregate) and would hold a loud one — so it is its own exhaustive
+    /// match, and for the same reason: a new kind must state whether it
+    /// alerts.
+    pub fn is_silent(self) -> bool {
+        match self {
+            Self::OrderNotFound
+            | Self::SamePrice
+            | Self::ReduceOnlyRejected
+            | Self::TriggerImmediate
+            | Self::DuplicateOrderId
+            // -1015 and an IP ban are both reported in aggregate by the
+            // rate tracker; per-order lines would just be noise.
+            | Self::TooManyOrders
+            | Self::IpBanned => true,
+
+            Self::ServerBusy
+            | Self::Network
+            | Self::RateLimited
+            | Self::CancelReplacePartial
+            | Self::CancelReplaceFailed
+            | Self::ModifyLimitExceeded
+            | Self::PrecisionError
+            | Self::QuantityExceeded
+            | Self::MinNotional
+            | Self::MaxPositionExceeded
+            | Self::InsufficientMargin
+            | Self::SymbolNotTrading
+            | Self::Unauthorized
+            | Self::PositionModeMismatch
+            | Self::AuthRejected
+            | Self::ParseError
+            | Self::Unknown => false,
+        }
+    }
 }
 
 impl ExchangeApiError {
@@ -169,31 +306,48 @@ impl ExchangeApiError {
         self.is_account_fatal() || self.is_symbol_fatal()
     }
 
+    /// What the runner does about this error. See [`Behaviour`].
+    pub fn behaviour(&self) -> Behaviour {
+        self.kind.behaviour()
+    }
+
     /// Account-level fatal: the whole account cannot trade, so the entire bot
     /// (every strategy and symbol) must stop. Only invalid credentials / IP
     /// qualify — there is no per-symbol recovery from these.
     pub fn is_account_fatal(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::Unauthorized | ApiErrorKind::PositionModeMismatch)
+        self.behaviour() == Behaviour::Account
     }
 
     /// Symbol-level fatal: the affected symbol is halted/delisted (`-4199`),
     /// but the account and every sibling symbol are unaffected. The runner
     /// stops only that symbol's task — it must NOT broadcast a global shutdown.
     pub fn is_symbol_fatal(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::SymbolNotTrading)
+        self.behaviour() == Behaviour::Symbol
     }
 
     /// Human-readable reason for fatal errors.
+    ///
+    /// The runner branches on `fatal_reason().is_some()` rather than on
+    /// `is_fatal()`, so the two must agree. They do by construction: the class
+    /// decides whether there is a reason at all, and the kind only chooses the
+    /// wording.
     pub fn fatal_reason(&self) -> Option<&'static str> {
-        match self.kind {
-            ApiErrorKind::Unauthorized => Some("invalid API key or IP not whitelisted"),
-            ApiErrorKind::SymbolNotTrading => Some("symbol not in trading status"),
-            // No venue's codes here: any adapter can map to this kind, and the
-            // error's own code and message are printed alongside this string.
-            ApiErrorKind::PositionModeMismatch => Some(
-                "account position mode (one-way vs hedge) does not match the bot's config \
-                 — every order is rejected; align the account's position mode with this \
-                 bot's hedgeMode setting"),
+        match self.behaviour() {
+            Behaviour::Account => Some(match self.kind {
+                ApiErrorKind::Unauthorized => "invalid API key or IP not whitelisted",
+                // No venue's codes here: any adapter can map to this kind, and
+                // the error's own code and message are printed alongside this
+                // string.
+                ApiErrorKind::PositionModeMismatch =>
+                    "account position mode (one-way vs hedge) does not match the bot's config \
+                     — every order is rejected; align the account's position mode with this \
+                     bot's hedgeMode setting",
+                _ => "the account cannot trade",
+            }),
+            Behaviour::Symbol => Some(match self.kind {
+                ApiErrorKind::SymbolNotTrading => "symbol not in trading status",
+                _ => "symbol cannot be traded",
+            }),
             _ => None,
         }
     }
@@ -219,7 +373,7 @@ impl ExchangeApiError {
     /// error fires before any successful placement, escalate to a hard
     /// stop (the underlying constraint isn't clearing).
     pub fn is_recoverable(&self) -> bool {
-        self.kind == ApiErrorKind::InsufficientMargin
+        self.behaviour() == Behaviour::Resource
     }
 
     /// Persistent errors that should stop the strategy (not the bot) after
@@ -229,42 +383,34 @@ impl ExchangeApiError {
     ///
     /// Excludes `InsufficientMargin`, which is recoverable on the wall
     /// clock and routed through `is_recoverable()` instead.
+    ///
+    /// `Auth` is here as well as `Bug`: a rejected credential is just as
+    /// deterministic as a malformed request, and the same breaker stops it.
     pub fn is_persistent(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::QuantityExceeded | ApiErrorKind::MinNotional | ApiErrorKind::MaxPositionExceeded | ApiErrorKind::PrecisionError | ApiErrorKind::AuthRejected)
+        matches!(self.behaviour(), Behaviour::Bug | Behaviour::Auth)
     }
 
     /// Errors that are expected and should be handled silently (no Telegram alert).
     /// TooManyOrders (-1015) is silent because the ApiLimitTracker handles it
     /// globally — individual per-order warnings would just spam the logs.
     pub fn is_silent(&self) -> bool {
-        matches!(
-            self.kind,
-            ApiErrorKind::OrderNotFound
-                | ApiErrorKind::SamePrice
-                | ApiErrorKind::ReduceOnlyRejected
-                | ApiErrorKind::TriggerImmediate
-                | ApiErrorKind::DuplicateOrderId
-                | ApiErrorKind::TooManyOrders
-                | ApiErrorKind::IpBanned
-        )
+        self.kind.is_silent()
     }
 
     /// `-4198`/`-5026`: the per-order amendment cap was hit. Not retryable and not
     /// fatal — the order is permanently un-amendable, so the runner cancels
     /// it and re-places a fresh order (cancel + replace) rather than waiting.
     pub fn is_modify_limit_exceeded(&self) -> bool {
-        self.kind == ApiErrorKind::ModifyLimitExceeded
+        self.behaviour() == Behaviour::Amend
     }
 
     /// Errors that can be retried after a short delay.
     ///
     /// Note: `TooManyOrders` (-1015) is NOT retryable — it's a per-minute
-    /// order rate limit. Retrying after 1s just adds to the overload.
+    /// order rate limit. Retrying after 1s just adds to the overload. Nor is
+    /// `IpBanned`: retrying extends the ban.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.kind,
-            ApiErrorKind::Network | ApiErrorKind::RateLimited
-        )
+        self.behaviour() == Behaviour::Retry
     }
 }
 
@@ -458,5 +604,84 @@ mod tests {
         assert!(kind(ApiErrorKind::RateLimited).is_retryable());
         assert!(!kind(ApiErrorKind::IpBanned).is_retryable(), "retrying extends the ban");
         assert!(!kind(ApiErrorKind::TooManyOrders).is_retryable(), "retrying adds to the overload");
+    }
+
+    /// The venue asking us to try again is the one case where NOT retrying is
+    /// the bug: -1001/-1008 never reached the matching engine, and dropping
+    /// them means an exit edit silently doesn't happen.
+    #[test]
+    fn a_busy_server_is_retried_and_heard() {
+        let e = kind(ApiErrorKind::ServerBusy);
+        assert_eq!(e.behaviour(), Behaviour::Retry);
+        assert!(e.is_retryable());
+        assert!(!e.is_silent(), "a venue blip that outlasts the retries must surface");
+        assert!(!e.is_fatal() && !e.is_persistent() && !e.is_recoverable());
+    }
+
+    /// Every predicate now reads one exhaustive `behaviour()`, so a kind
+    /// cannot be in two mechanisms at once. This asserts the disjointness the
+    /// old independent `matches!` lists only had by convention.
+    #[test]
+    fn behaviour_classes_own_disjoint_mechanisms() {
+        for (b, k) in [
+            (Behaviour::Retry, ApiErrorKind::Network),
+            (Behaviour::Reconcile, ApiErrorKind::CancelReplacePartial),
+            (Behaviour::Rate, ApiErrorKind::TooManyOrders),
+            (Behaviour::Amend, ApiErrorKind::ModifyLimitExceeded),
+            (Behaviour::Bug, ApiErrorKind::PrecisionError),
+            (Behaviour::Resource, ApiErrorKind::InsufficientMargin),
+            (Behaviour::Symbol, ApiErrorKind::SymbolNotTrading),
+            (Behaviour::Account, ApiErrorKind::Unauthorized),
+            (Behaviour::Auth, ApiErrorKind::AuthRejected),
+            (Behaviour::Benign, ApiErrorKind::OrderNotFound),
+            (Behaviour::Unknown, ApiErrorKind::Unknown),
+        ] {
+            let e = kind(k);
+            assert_eq!(e.behaviour(), b, "{k:?}");
+            assert_eq!(e.is_retryable(), b == Behaviour::Retry, "{k:?} retryable");
+            assert_eq!(e.is_recoverable(), b == Behaviour::Resource, "{k:?} recoverable");
+            assert_eq!(e.is_account_fatal(), b == Behaviour::Account, "{k:?} account-fatal");
+            assert_eq!(e.is_symbol_fatal(), b == Behaviour::Symbol, "{k:?} symbol-fatal");
+            assert_eq!(e.is_modify_limit_exceeded(), b == Behaviour::Amend, "{k:?} amend");
+            assert_eq!(
+                e.is_persistent(),
+                matches!(b, Behaviour::Bug | Behaviour::Auth),
+                "{k:?} persistent",
+            );
+        }
+    }
+
+    /// `handle_order_error` branches on `fatal_reason().is_some()`, not on
+    /// `is_fatal()`. They agree by construction — this pins it for every kind
+    /// a class can hold, including ones added later that never get their own
+    /// wording.
+    #[test]
+    fn fatal_reason_agrees_with_is_fatal() {
+        for k in [
+            ApiErrorKind::Unauthorized,
+            ApiErrorKind::PositionModeMismatch,
+            ApiErrorKind::SymbolNotTrading,
+            ApiErrorKind::PrecisionError,
+            ApiErrorKind::Network,
+            ApiErrorKind::ServerBusy,
+            ApiErrorKind::Unknown,
+        ] {
+            let e = kind(k);
+            assert_eq!(e.fatal_reason().is_some(), e.is_fatal(), "{k:?}");
+        }
+    }
+
+    /// An unmapped code has no behaviour to inherit. The safety it does get —
+    /// throttled alerts and breaker credit on order paths — is the runner's
+    /// (§4 of the coverage plan), and depends on this staying inert here.
+    #[test]
+    fn unknown_carries_no_behaviour() {
+        for k in [ApiErrorKind::Unknown, ApiErrorKind::ParseError] {
+            let e = kind(k);
+            assert_eq!(e.behaviour(), Behaviour::Unknown, "{k:?}");
+            assert!(!e.is_retryable(), "{k:?} must never be blind-retried");
+            assert!(!e.is_fatal() && !e.is_persistent() && !e.is_recoverable(), "{k:?}");
+            assert!(!e.is_silent(), "{k:?} must reach the operator");
+        }
     }
 }
