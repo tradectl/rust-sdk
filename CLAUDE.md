@@ -289,23 +289,32 @@ Three standalone pure functions (not on a struct):
 
 ## Error System
 
-```rust
-pub enum ApiErrorKind {
-    OrderNotFound, SlTriggerPrice, ReduceOnlyRejected, SamePrice,
-    InsufficientMargin, Unauthorized, SymbolNotTrading, TooManyOrders,
-    QuantityExceeded, MaxPositionExceeded, MinNotional, DuplicateOrderId,
-    RateLimited, IpBanned, Network, ParseError, Unknown,
-}
-```
+`ApiErrorKind` is the venue-neutral vocabulary; `Behaviour` is the closed set of
+things the runner *does* about a kind. Every predicate is derived from one
+exhaustive `ApiErrorKind::behaviour()` — no `_` arm — so adding a kind without
+deciding its behaviour does not compile. Silence is orthogonal (a class can hold
+both loud and quiet kinds) and has its own exhaustive `is_silent()`, for the same
+reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 
-| Method | Returns true for | Runner behavior |
-|--------|-----------------|-----------------|
-| `is_fatal()` | Unauthorized, SymbolNotTrading | Stop all trading |
-| `is_persistent()` | QuantityExceeded, MinNotional, MaxPositionExceeded | Stop strategy after MAX_PERSISTENT_ERRORS |
-| `is_recoverable()` | InsufficientMargin | Cancel resting entry, pause symbol 60 s; second strike escalates to stop |
-| `is_retryable()` | Network, RateLimited | Retry with backoff |
-| `is_silent()` | OrderNotFound, SamePrice, ReduceOnlyRejected, TriggerImmediate, DuplicateOrderId, TooManyOrders, IpBanned | No Telegram alert |
-| `is_margin()` | InsufficientMargin | Specific margin handling |
+| Behaviour | Kinds | Runner mechanism |
+|---|---|---|
+| `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
+| `Reconcile` | CancelReplacePartial, CancelReplaceFailed | read the order back before deciding |
+| `Rate` | TooManyOrders, IpBanned | `ApiLimitTracker` / ban-duration pause |
+| `Amend` | ModifyLimitExceeded | cancel + place fresh |
+| `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded | 3-in-60s breaker → stop strategy |
+| `Resource` | InsufficientMargin | cancel entry + 60s pause; second strike stops |
+| `Symbol` | SymbolNotTrading | stop that symbol's task |
+| `Account` | Unauthorized, PositionModeMismatch | stop the bot |
+| `Auth` | AuthRejected | breaker → stop strategy, siblings live |
+| `Benign` | OrderNotFound, TriggerImmediate, ReduceOnlyRejected, SamePrice, DuplicateOrderId | release the slot, no alert |
+| `Unknown` | Unknown, ParseError | never retried; throttled alert + breaker credit on order paths |
+
+Derived predicates: `is_retryable()` = `Retry`, `is_recoverable()` = `Resource`,
+`is_account_fatal()` = `Account`, `is_symbol_fatal()` = `Symbol`,
+`is_persistent()` = `Bug | Auth`, `is_modify_limit_exceeded()` = `Amend`.
+`fatal_reason()` returns `Some` exactly for `Account | Symbol`, so it can never
+disagree with `is_fatal()`.
 
 `ExchangeApiError::unclassified(status, body, endpoint)` parses an error body from a venue whose code space is not mapped: it reports the code and message and always yields `Unknown`. Venues that know their own numbers classify beside their adapter (`binance::parse_binance_error`, `okx::parse_okx_error`, `bybit::parse_bybit_error`) — the SDK owns the kinds and predicates, never a venue's codes.
 
