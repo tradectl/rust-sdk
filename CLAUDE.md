@@ -365,7 +365,7 @@ cargo test                            # ~36 tests (profit, errors, types)
 
 | When X happens... | Y happens | Why it matters |
 |---|---|---|
-| Exchange returns unknown error code (e.g., -9999) | `ApiErrorKind::Unknown`, whatever the message says. The message-keyword fallback was removed — it let an unmapped code reach a kind, and the runner behaviour behind it, on a substring match | A code that needs handling gets a row in its venue's table. Nothing is inferred from wording |
+| Exchange returns unknown error code (e.g., -9999) | `ApiErrorKind::Unknown`, whatever the message says. The message-keyword fallback was removed — it let an unmapped code reach a kind, and the runner behaviour behind it, on a substring match | A code that needs handling gets a row in its venue's table. There is no fallback; the only message reads left are two per-code discriminators (Binance `-1003` at HTTP 418, Spot `-2010`), each confined to the row that declares it |
 | HTTP 5xx without JSON body | `serde_json::from_str()` fails. Creates Unknown error with `code = -(http_status)` | Network/exchange outages don't crash the parser |
 | HTTP 418 + message contains "banned" | `ApiErrorKind::IpBanned`. `is_silent()=true` (no Telegram). `is_retryable()=false` | IP bans are persistent. Retrying makes it worse |
 | HTTP 429 vs HTTP 418 with same error code | 429 → `RateLimited` (retryable). 418 → `IpBanned` (not retryable). **HTTP status is the differentiator** | Same error code can mean different things depending on HTTP status |

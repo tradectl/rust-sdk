@@ -188,10 +188,12 @@ impl ExchangeApiError {
         match self.kind {
             ApiErrorKind::Unauthorized => Some("invalid API key or IP not whitelisted"),
             ApiErrorKind::SymbolNotTrading => Some("symbol not in trading status"),
+            // No venue's codes here: any adapter can map to this kind, and the
+            // error's own code and message are printed alongside this string.
             ApiErrorKind::PositionModeMismatch => Some(
                 "account position mode (one-way vs hedge) does not match the bot's config \
-                 — every order is rejected (-4061); align the account's Binance position \
-                 mode with this bot's hedgeMode setting"),
+                 — every order is rejected; align the account's position mode with this \
+                 bot's hedgeMode setting"),
             _ => None,
         }
     }
