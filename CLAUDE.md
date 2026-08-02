@@ -299,7 +299,7 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | Behaviour | Kinds | Runner mechanism |
 |---|---|---|
 | `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
-| `Reconcile` | CancelReplacePartial, CancelReplaceFailed | read the order back before deciding |
+| `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed | read the order back before deciding |
 | `Rate` | TooManyOrders, IpBanned | `ApiLimitTracker` / ban-duration pause |
 | `Amend` | ModifyLimitExceeded | cancel + place fresh |
 | `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded | 3-in-60s breaker → stop strategy |

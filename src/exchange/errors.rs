@@ -99,6 +99,18 @@ pub enum ApiErrorKind {
     RateLimited,
     /// -1003 + HTTP 418: IP banned by exchange (FATAL). Retrying makes it worse.
     IpBanned,
+    /// The request may or may not have executed, and the response does not
+    /// say which: Binance -1006 UNEXPECTED_RESP (message-bus desync), -1007
+    /// TIMEOUT (the backend answered late), HTTP 500 ("execution status
+    /// UNKNOWN" in Binance's own words), a WS-API request that timed out, or
+    /// a socket that dropped with the request in flight.
+    ///
+    /// The distinction from [`ServerBusy`](Self::ServerBusy) is the whole
+    /// point: that one is known *not* to have executed and is safe to
+    /// re-send, this one is not. Re-sending an order here is how one entry
+    /// becomes two, so the runner reads the order back before deciding
+    /// anything.
+    AmbiguousOutcome,
     /// The venue is temporarily unable to serve the request and says so:
     /// Binance -1001 DISCONNECTED ("Please try again"), -1008 SERVER_BUSY, or
     /// a 502/503/504 with no JSON body. The request never reached the matching
@@ -173,7 +185,9 @@ impl ApiErrorKind {
         match self {
             Self::ServerBusy | Self::Network | Self::RateLimited => Behaviour::Retry,
 
-            Self::CancelReplacePartial | Self::CancelReplaceFailed => Behaviour::Reconcile,
+            Self::AmbiguousOutcome
+            | Self::CancelReplacePartial
+            | Self::CancelReplaceFailed => Behaviour::Reconcile,
 
             Self::TooManyOrders | Self::IpBanned => Behaviour::Rate,
 
@@ -223,7 +237,8 @@ impl ApiErrorKind {
             | Self::TooManyOrders
             | Self::IpBanned => true,
 
-            Self::ServerBusy
+            Self::AmbiguousOutcome
+            | Self::ServerBusy
             | Self::Network
             | Self::RateLimited
             | Self::CancelReplacePartial
@@ -616,6 +631,21 @@ mod tests {
         assert!(e.is_retryable());
         assert!(!e.is_silent(), "a venue blip that outlasts the retries must surface");
         assert!(!e.is_fatal() && !e.is_persistent() && !e.is_recoverable());
+    }
+
+    /// The two look alike and must never be confused: both mean "the request
+    /// failed for a reason that is not our fault", but one is known not to
+    /// have executed and the other might have. Re-sending the second is how
+    /// one entry becomes two.
+    #[test]
+    fn an_ambiguous_outcome_is_not_a_transient_fault() {
+        let ambiguous = kind(ApiErrorKind::AmbiguousOutcome);
+        assert_eq!(ambiguous.behaviour(), Behaviour::Reconcile);
+        assert!(!ambiguous.is_retryable(), "the order may already exist");
+        assert!(!ambiguous.is_silent(), "the operator must see a reconcile happen");
+        assert!(!ambiguous.is_fatal() && !ambiguous.is_persistent() && !ambiguous.is_recoverable());
+
+        assert!(kind(ApiErrorKind::ServerBusy).is_retryable(), "this one did NOT execute");
     }
 
     /// Every predicate now reads one exhaustive `behaviour()`, so a kind
