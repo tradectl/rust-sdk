@@ -61,6 +61,20 @@ pub trait MarketAdapter: Send + Sync {
     /// Adapters with no network round trip (paper, replay, tests) return `Ok(0)`.
     async fn ping(&self) -> ExchangeResult<u64>;
 
+    /// Re-read the venue's clock now, rather than waiting for the periodic
+    /// sync.
+    ///
+    /// Called when a request comes back `ApiErrorKind::ClockSkew`. That error
+    /// fails EVERY signed request, including the ones that only read state,
+    /// so waiting out the ordinary sync interval means minutes of a bot that
+    /// cannot trade or even see its own orders.
+    ///
+    /// Adapters with no clock to sync return `Ok(())` — but they must say so
+    /// explicitly. A default body here is what lets a delegating wrapper drop
+    /// the forward silently, which is how a correctly-configured account spent
+    /// 2026-07-18 having every order rejected.
+    async fn resync_clock(&self) -> ExchangeResult<()>;
+
     // ── Pair Management ──────────────────────────────────────────
     fn get_pairs(&self) -> HashMap<String, PairInfo>;
     fn get_pair_info(&self, symbol: &str) -> Option<PairInfo>;
