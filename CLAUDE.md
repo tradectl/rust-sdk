@@ -298,6 +298,7 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 
 | Behaviour | Kinds | Runner mechanism |
 |---|---|---|
+| `Success` | AlreadyApplied | the caller's goal already holds — not an error |
 | `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
 | `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed, PositionNotSufficient | read the order back before deciding |
 | `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause |
@@ -309,6 +310,7 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | `Account` | Unauthorized, PositionModeMismatch | stop the bot |
 | `Auth` | AuthRejected | breaker → stop strategy, siblings live |
 | `Benign` | OrderNotFound, TriggerImmediate, ReduceOnlyRejected, SamePrice, DuplicateOrderId | release the slot, no alert |
+| `Health` | ClockSkew, ListenKeyDead, LeverageRejected | repair the subsystem; never touches order flow |
 | `Unknown` | Unknown, ParseError | never retried; throttled alert + breaker credit on order paths |
 
 Derived predicates: `is_retryable()` = `Retry`, `is_recoverable()` = `Resource`,
