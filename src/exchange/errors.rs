@@ -620,14 +620,24 @@ impl ExchangeApiError {
     /// each venue's parse fn (`engine/exchange` pins that with a source scan).
     /// Locally-synthesized errors that carry no venue code under audit
     /// (paper's `OrderNotFound`, the api-limit gate refusal) stay unlogged.
-    /// `Network`/`ParseError` log at debug — transport failures, not mapping
-    /// decisions, and routine during connectivity blips.
+    ///
+    /// Two levels, on the `decision` target so an operator can filter this
+    /// stream without losing it (`RUST_LOG=warn,decision=info`, or
+    /// `decision=debug` for a full census):
+    ///
+    /// * **debug** for the kinds that recur by design — everything
+    ///   [`is_silent`](Self::is_silent) suppresses alerts for, plus transport
+    ///   and parse failures. These are the storm shapes: a single `-2013`
+    ///   edit-failed storm in this system's history reached 4.97M errors, and
+    ///   one audit line each would be ~650 MB written twice.
+    /// * **info** for every decision that carries consequence.
     pub fn logged(self) -> Self {
         match self.kind {
             ApiErrorKind::Network | ApiErrorKind::ParseError => {
-                log::debug!("{}", self.decision_line())
+                log::debug!(target: "decision", "{}", self.decision_line())
             }
-            _ => log::info!("{}", self.decision_line()),
+            k if k.is_silent() => log::debug!(target: "decision", "{}", self.decision_line()),
+            _ => log::info!(target: "decision", "{}", self.decision_line()),
         }
         self
     }
