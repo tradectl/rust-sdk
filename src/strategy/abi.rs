@@ -33,12 +33,15 @@
 use std::mem::{align_of, offset_of, size_of};
 
 use crate::types::{
-    DepthLevel, OrderBookDepth, ParamDef, Params, Side, TickerEvent, TradeEvent, VolumeProfile,
+    DepthLevel, MaSeries, OrderBookDepth, ParamDef, Params, Side, TickerEvent, TradeEvent,
+    VolumeProfile,
 };
 
+use super::batch::BATCH_TRAIT_REVISION;
 use super::{
-    Action, EntryOrder, ExitOrder, ExitType, FillEvent, FillResponse, MonitorSnapshot, OrderKind,
-    PositionInfo, PriceLine, StrategyContext, StrategyPlugin, STRATEGY_ABI_VERSION,
+    Action, BatchConfig, BatchDiagnostics, BatchExchange, BatchResult, EntryOrder, ExitOrder,
+    ExitType, FillEvent, FillResponse, MonitorSnapshot, OrderKind, PositionInfo, PriceLine,
+    StrategyContext, StrategyPlugin, STRATEGY_ABI_VERSION,
 };
 
 /// tradectl-sdk version this side was built with (diagnostics only).
@@ -90,6 +93,7 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(StrategyContext<'static>, volume) as u64);
     h = mix(h, offset_of!(StrategyContext<'static>, can_enter) as u64);
     h = mix(h, offset_of!(StrategyContext<'static>, entry_orders) as u64);
+    h = mix(h, offset_of!(StrategyContext<'static>, ma) as u64);
 
     // -- PositionInfo --
     h = mix(h, size_of::<PositionInfo>() as u64);
@@ -182,6 +186,41 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(VolumeProfile, current_per_min) as u64);
     h = mix(h, offset_of!(VolumeProfile, buy_ratio) as u64);
     h = mix(h, offset_of!(VolumeProfile, baseline_ready) as u64);
+
+    // -- Batch (SoA) boundary --
+    //
+    // `batch_factory` hands the driver a `Box<dyn BatchStrategy>` whose vtable
+    // and argument structs cross the dylib boundary exactly like the scalar
+    // ones do. Until this block existed nothing in the loader looked at them at
+    // all (coverage FINDINGS F9): a plugin built against a different
+    // `BatchConfig` was not refused, it was *called*, so the mismatch was UB
+    // rather than a load error. Struct layout folds in automatically below;
+    // the trait's method set has no const-observable shape, so a change to it
+    // rides on [`BATCH_TRAIT_REVISION`], which is hand-bumped.
+    h = mix(h, BATCH_TRAIT_REVISION as u64);
+    h = mix(h, size_of::<BatchConfig>() as u64);
+    h = mix(h, align_of::<BatchConfig>() as u64);
+    h = mix(h, offset_of!(BatchConfig, initial_balance) as u64);
+    h = mix(h, offset_of!(BatchConfig, market_type) as u64);
+    h = mix(h, offset_of!(BatchConfig, ma_max_period) as u64);
+    h = mix(h, offset_of!(BatchConfig, ma_interval_ms) as u64);
+    h = mix(h, offset_of!(BatchConfig, ma_from_klines) as u64);
+    h = mix(h, offset_of!(BatchConfig, ma_warmup_bars) as u64);
+    h = mix(h, size_of::<BatchResult>() as u64);
+    h = mix(h, align_of::<BatchResult>() as u64);
+    h = mix(h, offset_of!(BatchResult, total_pnl) as u64);
+    h = mix(h, offset_of!(BatchResult, calmar_ratio) as u64);
+    h = mix(h, size_of::<BatchDiagnostics>() as u64);
+    h = mix(h, align_of::<BatchDiagnostics>() as u64);
+    h = mix(h, size_of::<BatchExchange>() as u64);
+    h = mix(h, align_of::<BatchExchange>() as u64);
+    h = mix(h, offset_of!(BatchExchange, n) as u64);
+    h = mix(h, offset_of!(BatchExchange, entry_price) as u64);
+    h = mix(h, offset_of!(BatchExchange, pos_active) as u64);
+    h = mix(h, offset_of!(BatchExchange, balance) as u64);
+    h = mix(h, offset_of!(BatchExchange, ma) as u64);
+    h = mix(h, size_of::<MaSeries>() as u64);
+    h = mix(h, align_of::<MaSeries>() as u64);
 
     // -- Enums / opaque types: size + align only (offset_of! doesn't apply to
     //    enum variants, and Params wraps a private HashMap). A layout change to
