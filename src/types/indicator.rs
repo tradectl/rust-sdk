@@ -31,11 +31,23 @@
 //! [`Strategy::indicators`]: crate::Strategy::indicators
 //! [`StrategyContext::indicators`]: crate::StrategyContext::indicators
 
+/// Bumped whenever a discriminant of [`IndicatorKind`] changes meaning —
+/// reordered, removed, or reused. Appending a kind does not require a bump.
+///
+/// The layout fingerprint hashes sizes and offsets, and a discriminant is
+/// neither: swap two variants and a stale plugin asking for `Ema = 1` gets
+/// whatever the engine now calls `1`, with the version check and the
+/// fingerprint both passing. Same blind spot as a vtable, same fix as
+/// [`BATCH_TRAIT_REVISION`] — a hand-turned number folded into the hash.
+///
+/// [`BATCH_TRAIT_REVISION`]: crate::strategy::batch::BATCH_TRAIT_REVISION
+pub const INDICATOR_KIND_REVISION: u32 = 1;
+
 /// Which indicator to compute.
 ///
 /// `#[repr(u16)]` because this crosses the plugin ABI inside
-/// [`IndicatorRequest`]. Append new kinds at the end — the discriminants are
-/// part of the boundary, and the layout fingerprint does not observe reordering.
+/// [`IndicatorRequest`]. Append new kinds at the end; if you must reorder or
+/// remove one, bump [`INDICATOR_KIND_REVISION`].
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndicatorKind {
@@ -51,13 +63,13 @@ pub enum IndicatorKind {
     /// Relative strength index, Wilder-smoothed. 0…100.
     Rsi = 2,
     /// Moving-average convergence/divergence line (fast EMA − slow EMA).
-    /// `period` = fast, `aux_a` = slow, `aux_b` = signal.
+    /// `period` = fast, `aux[0]` = slow, `aux[1]` = signal.
     Macd = 3,
     /// The MACD signal line — the EMA of the MACD line.
     MacdSignal = 4,
     /// MACD line − signal line.
     MacdHistogram = 5,
-    /// Bollinger middle band — the simple average. `aux_a` = σ × 100
+    /// Bollinger middle band — the simple average. `aux[0]` = σ × 100
     /// (`0` means the conventional 2σ).
     BollingerMid = 6,
     /// Middle band + σ × the multiplier.
@@ -145,10 +157,14 @@ pub struct IndicatorRequest {
     /// subtract. On an SMA it is free — the shared series already holds the
     /// history.
     pub lag: u32,
-    /// Secondary parameter (MACD slow, Bollinger σ×100). Ignored otherwise.
-    pub aux_a: u32,
-    /// Tertiary parameter (MACD signal). Ignored otherwise.
-    pub aux_b: u32,
+    /// Kind-specific parameters, unused slots left zero. MACD reads `[slow,
+    /// signal, _, _]`; Bollinger reads σ×100 from `aux[0]`.
+    ///
+    /// A fixed array rather than named fields because the arity is frozen by the
+    /// ABI fingerprint: a kind wanting a third parameter (Ichimoku's three
+    /// periods and displacement) must fit here or force a version bump. Four is
+    /// what the widest indicator in common use needs.
+    pub aux: [u32; 4],
 }
 
 impl IndicatorRequest {
@@ -161,8 +177,7 @@ impl IndicatorRequest {
             period,
             interval_ms: interval_sec.max(1) * 1000,
             lag: 0,
-            aux_a: 0,
-            aux_b: 0,
+            aux: [0; 4],
         }
     }
 
@@ -178,10 +193,16 @@ impl IndicatorRequest {
         self
     }
 
-    /// Set the secondary/tertiary parameters (MACD slow + signal, Bollinger σ).
+    /// Set the leading kind-specific parameters (MACD slow + signal, Bollinger σ).
     pub fn with_aux(mut self, a: u32, b: u32) -> Self {
-        self.aux_a = a;
-        self.aux_b = b;
+        self.aux[0] = a;
+        self.aux[1] = b;
+        self
+    }
+
+    /// Set every kind-specific parameter, for kinds needing more than two.
+    pub fn with_aux_all(mut self, aux: [u32; 4]) -> Self {
+        self.aux = aux;
         self
     }
 
@@ -198,8 +219,7 @@ impl IndicatorRequest {
             source: self.source,
             period: self.period,
             interval_ms: self.interval_ms,
-            aux_a: self.aux_a,
-            aux_b: self.aux_b,
+            aux: self.aux,
         }
     }
 }
@@ -213,8 +233,7 @@ pub struct IndicatorInstanceKey {
     pub source: IndicatorSource,
     pub period: u32,
     pub interval_ms: u32,
-    pub aux_a: u32,
-    pub aux_b: u32,
+    pub aux: [u32; 4],
 }
 
 /// One indicator's reading, as of the event being dispatched.
@@ -233,7 +252,13 @@ pub struct IndicatorValue {
 
 impl IndicatorValue {
     /// The reading a not-yet-warm indicator reports.
-    pub const COLD: Self = Self { value: 0.0, ready: false };
+    ///
+    /// NaN, not zero, and deliberately: a strategy that ignores `ready` and
+    /// writes `price > ma` compares against this number directly. Against `0.0`
+    /// that is true for every price, so a cold indicator would wave through
+    /// every entry — the failure reads as a working filter. Every comparison
+    /// against NaN is false instead, so the same bug refuses to trade.
+    pub const COLD: Self = Self { value: f64::NAN, ready: false };
 
     pub fn ready(value: f64) -> Self {
         Self { value, ready: true }
@@ -260,7 +285,7 @@ mod tests {
         assert_eq!(r.interval_ms, 5_000);
         assert_eq!(r.lag, 3);
         assert_eq!(r.source, IndicatorSource::Kline);
-        assert_eq!((r.aux_a, r.aux_b), (7, 9));
+        assert_eq!(r.aux, [7, 9, 0, 0]);
     }
 
     #[test]
@@ -314,5 +339,30 @@ mod tests {
     fn a_cold_reading_yields_nothing() {
         assert_eq!(IndicatorValue::COLD.get(), None);
         assert_eq!(IndicatorValue::ready(1.5).get(), Some(1.5));
+    }
+
+    /// The reason `COLD` is NaN rather than zero. A strategy that skips the
+    /// `ready` check and compares against the raw value is writing a bug either
+    /// way — this pins which way the bug fails. Against `0.0` every price is
+    /// above the average and the cold filter passes everything; against NaN
+    /// every comparison is false and it trades nothing.
+    #[test]
+    fn a_cold_value_read_raw_refuses_rather_than_admits() {
+        let cold = IndicatorValue::COLD.value;
+        for price in [0.01, 1.0, 50_000.0] {
+            assert!(!(price > cold), "price {price} must not read as above a cold indicator");
+            assert!(!(price < cold), "nor below it");
+            assert!(!(price == cold), "nor equal to it");
+        }
+    }
+
+    #[test]
+    fn aux_slots_beyond_the_first_two_survive_a_round_trip() {
+        let r = IndicatorRequest::new(IndicatorKind::Sma, 9, 60).with_aux_all([1, 2, 3, 4]);
+        assert_eq!(r.aux, [1, 2, 3, 4]);
+        // Identity covers every slot, so a kind using the later ones does not
+        // silently collapse two distinct requests onto one instance.
+        let other = IndicatorRequest::new(IndicatorKind::Sma, 9, 60).with_aux_all([1, 2, 3, 5]);
+        assert_ne!(r.instance_key(), other.instance_key());
     }
 }

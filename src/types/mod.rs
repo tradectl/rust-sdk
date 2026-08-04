@@ -19,7 +19,7 @@ pub use pair_info::*;
 pub use market_data::*;
 pub use indicator::{
     IndicatorFamily, IndicatorInstanceKey, IndicatorKind, IndicatorRequest, IndicatorSource,
-    IndicatorValue,
+    IndicatorValue, INDICATOR_KIND_REVISION,
 };
 pub use volume::{VolumeProfile, VolumeTracker};
 pub use profit::{

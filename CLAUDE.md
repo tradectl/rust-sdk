@@ -81,6 +81,7 @@ pub struct StrategyContext<'a> {
     pub can_enter: bool,                      // runner will accept a fresh PlaceEntry now
     pub entry_orders: &'a [EntryOrder],       // this symbol's live entry orders (runner-tracked)
     pub indicators: &'a [IndicatorValue],     // readings for what this strategy declared, in declaration order
+    pub requests: &'a [IndicatorRequest],     // the declarations those answer — read via ctx.value_for(&req)
 }
 ```
 
@@ -307,6 +308,15 @@ let now = ctx.indicator(0)?;        // None while cold — never a meaningless n
 let slope = now - ctx.indicator(1)?;
 ```
 
+Reads come back positionally *and* by request: `ctx.indicator(i)` is the ordinal, `ctx.value_for(&req)`
+looks the reading up by what was asked for. Prefer `value_for` in the scalar path — a declaration built
+conditionally on params makes index 1 mean different things in different configs, and a read site that
+disagrees is neither a compile error nor a panic. Ordinals belong in the batch path, where the grid is
+large and the strategy builds the trial→ordinal map once.
+
+`Atr` and `Vwap` read more than the close, so a group holding one stays cold until it has seen bars
+carrying real range or volume — a close-only seed reports nothing rather than a confident zero.
+
 Kinds: `Sma`, `Ema`, `Rsi`, `Macd`/`MacdSignal`/`MacdHistogram`,
 `BollingerMid`/`Upper`/`Lower`, `Atr`, `Vwap`, `StdDev`. Outputs of one family share an instance,
 so asking for a MACD line and its signal computes one MACD. `lag` is a read offset, not a second
@@ -319,7 +329,8 @@ Two properties this shape buys:
   the period* is a different question: `Sma` 10…200 is one prefix-sum ring, `Ema` 10…200 is 191
   recursions. SMA is the only kind with a closed form across periods — everything else depends on
   its own previous value, so period 50 cannot be read out of state built for period 20.
-- **A new kind costs no ABI change.** Kinds are values, not fields.
+- **A new kind costs no ABI change.** Kinds are values, not fields. Reordering or removing one *does*: discriminants cross the boundary and no `offset_of!` observes them, so that case rides on the hand-bumped `INDICATOR_KIND_REVISION` — the same mechanism as `BATCH_TRAIT_REVISION` for the invisible vtable.
+- **A new *source* is not free.** `IndicatorSource` adds a feed method and a routing site in every driver (live, replay, scalar backtest, batch, shadow). That is the multi-repo change the design otherwise avoids.
 
 Warmup is a property of the whole declared set: `IndicatorSet::all_ready` ANDs into the runner's
 `can_enter`, gating **new entries only** — exits are never gated — and every trial in a sweep
@@ -476,7 +487,8 @@ cargo test                            # ~36 tests (profit, errors, types)
 ## Gotchas
 
 - **ABI version must match** between SDK and strategy. Bump `STRATEGY_ABI_VERSION` on any breaking change to Strategy/Action/FillEvent/StrategyPlugin — and bump `BATCH_TRAIT_REVISION` too when `BatchStrategy` gains or loses a method, defaulted or not.
-- **Never add a `StrategyContext` field without checking `Default` covers it.** The struct is built by literal in strategy test fixtures; `Default` is what keeps a new field from breaking every strategy repo.
+- **Never add a `StrategyContext` field without checking `Default` covers it.** The struct is built by literal in strategy test fixtures; `Default` is what keeps a new field from breaking every strategy repo. **Gate-shaped fields must default to the refusing value** — `can_enter` defaults to `false`, so a field someone forgets to populate blocks entries instead of waving them through. `Default` is for test and plugin fixtures only: the engine's own construction sites stay exhaustive literals, because that is the only thing forcing the runner to consider a new field.
+- **`IndicatorValue::COLD` is NaN, not zero.** A strategy that skips the `ready` check and writes `price > ma` compares against the raw value; against `0.0` every price is above a cold average and the filter admits everything. Every comparison against NaN is false, so the same bug refuses to trade instead.
 - **StrategyPlugin is `#[repr(C)]`** — never add non-FFI-safe fields.
 - **Strategy is `Send` but not `Sync`** — single-threaded per-symbol event loop. MarketAdapter is `Send + Sync` (shared via Arc).
 - **`&self` on MarketAdapter** means implementations must use interior mutability (Mutex/RwLock) for mutable state.

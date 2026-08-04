@@ -213,6 +213,16 @@ pub struct StrategyContext<'a> {
     /// Empty when the strategy declared none, and in unit tests built from
     /// [`StrategyContext::default`].
     pub indicators: &'a [IndicatorValue],
+    /// The request list these readings answer, as the engine resolved it.
+    ///
+    /// Lets a strategy look a reading up by what it asked for
+    /// ([`value_for`](Self::value_for)) instead of by where it landed. That
+    /// matters because a declaration built conditionally — one entry when a
+    /// param is set, two when a second is — makes index 1 mean different things
+    /// in different configurations, and a read site that disagrees with the
+    /// declaration is neither a compile error nor a panic: it silently reads
+    /// the wrong indicator.
+    pub requests: &'a [IndicatorRequest],
 }
 
 impl Default for StrategyContext<'_> {
@@ -236,9 +246,13 @@ impl Default for StrategyContext<'_> {
             max_orders_reached: false,
             depth: None,
             volume: None,
-            can_enter: true,
+            // Deny by default. A gate field that someone forgets to populate
+            // should refuse to trade, not wave everything through — and a test
+            // that wants entries can say so in the one line it already writes.
+            can_enter: false,
             entry_orders: &[],
             indicators: &[],
+            requests: &[],
         }
     }
 }
@@ -249,6 +263,20 @@ impl StrategyContext<'_> {
     #[inline]
     pub fn indicator(&self, i: usize) -> Option<f64> {
         self.indicators.get(i).and_then(IndicatorValue::get)
+    }
+
+    /// The reading for a specific request, or `None` while it is cold or if
+    /// this strategy never declared it.
+    ///
+    /// The self-describing read: `ctx.value_for(&self.fast_ma)` cannot drift
+    /// out of step with a conditional declaration the way an index can. Costs a
+    /// scan of a list that is a handful of entries long in the scalar path;
+    /// prefer [`indicator`](Self::indicator) in the batch path, where the grid
+    /// is large and the strategy owns the ordinal bookkeeping anyway.
+    #[inline]
+    pub fn value_for(&self, req: &IndicatorRequest) -> Option<f64> {
+        let i = self.requests.iter().position(|r| r == req)?;
+        self.indicator(i)
     }
 
     /// True when every declared indicator has warmed up. The runner ANDs this
@@ -579,4 +607,51 @@ macro_rules! declare_batch_strategy {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use crate::types::{IndicatorKind, IndicatorRequest, IndicatorValue};
+
+    /// A gate field nobody populated must refuse, not permit. `Default` exists
+    /// so a new context field cannot break every strategy repo — but that same
+    /// silence is why its value has to be the safe one.
+    #[test]
+    fn a_default_context_refuses_entries() {
+        assert!(!StrategyContext::default().can_enter);
+    }
+
+    /// Reading by request survives a declaration whose shape depends on params.
+    /// Here the same read site is correct for both configurations; by ordinal,
+    /// index 1 would mean "the lagged average" in one and be out of range in
+    /// the other.
+    #[test]
+    fn a_read_by_request_follows_a_conditional_declaration() {
+        let fast = IndicatorRequest::new(IndicatorKind::Sma, 20, 60);
+        let slow = IndicatorRequest::new(IndicatorKind::Sma, 50, 60);
+
+        let both = [fast, slow];
+        let values = [IndicatorValue::ready(1.0), IndicatorValue::ready(2.0)];
+        let ctx = StrategyContext { requests: &both, indicators: &values, ..Default::default() };
+        assert_eq!(ctx.value_for(&fast), Some(1.0));
+        assert_eq!(ctx.value_for(&slow), Some(2.0));
+
+        // Same read sites, a declaration that dropped the fast average.
+        let only_slow = [slow];
+        let one = [IndicatorValue::ready(2.0)];
+        let ctx = StrategyContext { requests: &only_slow, indicators: &one, ..Default::default() };
+        assert_eq!(ctx.value_for(&slow), Some(2.0), "still finds what it declared");
+        assert_eq!(ctx.value_for(&fast), None, "and does not read the wrong one");
+    }
+
+    #[test]
+    fn a_cold_request_reads_as_absent_not_as_a_number() {
+        let req = IndicatorRequest::new(IndicatorKind::Ema, 20, 60);
+        let reqs = [req];
+        let cold = [IndicatorValue::COLD];
+        let ctx = StrategyContext { requests: &reqs, indicators: &cold, ..Default::default() };
+        assert_eq!(ctx.value_for(&req), None);
+        assert!(!ctx.indicators_ready());
+    }
 }

@@ -34,6 +34,7 @@ use std::mem::{align_of, offset_of, size_of};
 
 use crate::types::{
     DepthLevel, IndicatorRequest, IndicatorValue, OrderBookDepth, ParamDef, Params, Side,
+    INDICATOR_KIND_REVISION,
     TickerEvent, TradeEvent,
     VolumeProfile,
 };
@@ -95,6 +96,7 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(StrategyContext<'static>, can_enter) as u64);
     h = mix(h, offset_of!(StrategyContext<'static>, entry_orders) as u64);
     h = mix(h, offset_of!(StrategyContext<'static>, indicators) as u64);
+    h = mix(h, offset_of!(StrategyContext<'static>, requests) as u64);
     // The indicator boundary is plain data in both directions, so its layout is
     // the whole contract — a strategy declaring `IndicatorRequest`s the engine
     // reads differently is the same class of UB the batch block below covers.
@@ -105,12 +107,16 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(IndicatorRequest, period) as u64);
     h = mix(h, offset_of!(IndicatorRequest, interval_ms) as u64);
     h = mix(h, offset_of!(IndicatorRequest, lag) as u64);
-    h = mix(h, offset_of!(IndicatorRequest, aux_a) as u64);
-    h = mix(h, offset_of!(IndicatorRequest, aux_b) as u64);
+    h = mix(h, offset_of!(IndicatorRequest, aux) as u64);
     h = mix(h, size_of::<IndicatorValue>() as u64);
     h = mix(h, align_of::<IndicatorValue>() as u64);
     h = mix(h, offset_of!(IndicatorValue, value) as u64);
     h = mix(h, offset_of!(IndicatorValue, ready) as u64);
+    // Which kind each discriminant *means* is as load-bearing as the layout and
+    // is invisible to `offset_of!` — reorder the enum and a stale plugin's
+    // `Ema = 1` silently becomes whatever the engine now calls 1. Rides on the
+    // hand-turned revision, exactly like the batch trait's methods below.
+    h = mix(h, INDICATOR_KIND_REVISION as u64);
 
     // -- PositionInfo --
     h = mix(h, size_of::<PositionInfo>() as u64);
