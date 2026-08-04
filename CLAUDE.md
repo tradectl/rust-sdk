@@ -80,7 +80,8 @@ pub struct StrategyContext<'a> {
     pub max_orders_reached: bool,             // exchange order limit hit
     pub can_enter: bool,                      // runner will accept a fresh PlaceEntry now
     pub entry_orders: &'a [EntryOrder],       // this symbol's live entry orders (runner-tracked)
-    pub ma: Option<&'a MaSeries>,             // moving averages, engine-owned (None when maPeriod is 0)
+    pub indicators: &'a [IndicatorValue],     // readings for what this strategy declared, in declaration order
+    pub requests: &'a [IndicatorRequest],     // the declarations those answer — read via ctx.value_for(&req)
 }
 ```
 
@@ -175,7 +176,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 9;
+pub const STRATEGY_ABI_VERSION: u32 = 10;
 
 #[repr(C)]
 pub struct StrategyPlugin {
@@ -196,7 +197,8 @@ Three load gates (`strategy/abi.rs` `check_plugin_abi`), in order: `abi_version`
 safe to read on any plugin) → `rustc_version` (the load-bearing one — Rust has no stable ABI
 across compiler versions) → `abi_fingerprint`. The fingerprint folds `size_of`/`align_of`/
 `offset_of!` of every boundary type, **including the batch boundary** (`BatchConfig`,
-`BatchResult`, `BatchDiagnostics`, `BatchExchange`) as of v9. A `BatchStrategy` *method* change
+`BatchResult`, `BatchDiagnostics`, `BatchExchange`) as of v9, and the indicator boundary
+(`IndicatorRequest`, `IndicatorValue`) as of v10. A `BatchStrategy` *method* change
 has no observable layout, so it rides on the hand-bumped `BATCH_TRAIT_REVISION`.
 
 **Macros:**
@@ -215,9 +217,9 @@ Structure-of-Arrays execution for ~1000x throughput in sweep/shadow.
 pub trait BatchStrategy: Send {
     fn exchange(&self) -> &BatchExchange;
     fn exchange_mut(&mut self) -> &mut BatchExchange;
+    fn indicators(&self) -> Vec<IndicatorRequest> { vec![] } // declared once for the whole grid
     fn process_ticker(&mut self, ticker: &TickerEvent);      // required — strategy logic
-    fn check_trade(&mut self, trade: &TradeEvent) { ... }    // delegates to exchange; also advances the shared MA
-    fn process_kline(&mut self, kline: &KlineEvent) { ... }  // MA bars when maSource=1
+    fn check_trade(&mut self, trade: &TradeEvent) { ... }    // delegates to exchange
     fn force_close_all(&mut self, bid_price: f64, ask_price: f64) { ... }  // longs at bid, shorts at ask
     fn results(&self) -> Vec<BatchResult> { ... }
     fn trial_count(&self) -> usize { ... }
@@ -227,7 +229,7 @@ pub trait BatchStrategy: Send {
 }
 ```
 
-**BatchConfig**: `initial_balance`, `fees` (taker/maker), `slippage`, `leverage`, `latency_ms`, `jitter_ms`, `sl_delay_ms`, `market_type`, `contract_size`.
+**BatchConfig**: `initial_balance`, `fees` (taker/maker), `slippage`, `leverage`, `latency_ms`, `jitter_ms`, `sl_delay_ms`, `market_type`, `contract_size`. Indicators are *not* configured here — the batch declares them via `BatchStrategy::indicators()` and the driver publishes readings through `BatchExchange::set_indicators`.
 
 **compute_score**: `pnl% * min(trade_count / min_trades, 1.0) / (1 + max_dd%)` — rewards return, penalizes drawdown, gates on minimum trade count.
 
@@ -289,39 +291,54 @@ pub trait MarketAdapter: Send + Sync {
 }
 ```
 
-## Moving averages (`types/ma.rs`)
+## Indicators (`types/indicator.rs`)
 
-`MaSeries` answers `value(p)` for **every** period at once — one ring of closes plus one ring of
-prefix sums, so an update is 1 store + 1 add and a read is 1 subtract + 1 multiply regardless of
-how many periods anyone asks for. That is what makes a 191-period sweep affordable: an MA depends
-only on market data, never on params, so **one series serves every trial** and indicator cost is
-O(1) in trial count.
-
-Only the arithmetic mean (what charts call SMA) is implemented, and deliberately — it is the only
-common MA with a closed form across periods. EMA/HMA are recursive and would need an explicit
-period list and a pass per period per bar.
+A strategy **declares** what it needs; the engine builds, feeds and shares it. Only plain data
+crosses the plugin boundary — `IndicatorRequest` in, `IndicatorValue` out — because the
+implementations live in `tradectl-indicators` (engine repo) and this crate is the leaf everything
+links, so it cannot depend on the engine.
 
 ```rust
-ma.value(50)          // MA of the last 50 closed bars; None until 50 exist
-ma.value_live(50)     // includes the forming bar — chatters, use deliberately
-ma.value_at(50, 5)    // MA(50) as of 5 bars ago       (needs 50+5 capacity)
-ma.slope(50, 5)       // value(50) - value_at(50, 5)
-ma.cross(50, 200)     // 1 = crossed up this bar, -1 = down, 0 = no cross
+fn indicators(&self) -> Vec<IndicatorRequest> {
+    let fast = IndicatorRequest::new(IndicatorKind::Sma, 20, 60);   // SMA(20) on 1m bars
+    vec![fast, fast.lagged(5)]                                       // …and where it was 5 bars ago
+}
+// then, per event:
+let now = ctx.indicator(0)?;        // None while cold — never a meaningless number
+let slope = now - ctx.indicator(1)?;
 ```
 
-Read it every event; never cache a value in strategy state (that is the desync class that killed
-the pending-entry latch — see `entry_orders` above).
+Reads come back positionally *and* by request: `ctx.indicator(i)` is the ordinal, `ctx.value_for(&req)`
+looks the reading up by what was asked for. Prefer `value_for` in the scalar path — a declaration built
+conditionally on params makes index 1 mean different things in different configs, and a read site that
+disagrees is neither a compile error nor a panic. Ordinals belong in the batch path, where the grid is
+large and the strategy builds the trial→ordinal map once.
 
-Engines own the feeding via `MaFeed` (config + series + `CandleBuilder`). Bars are aggregated from
-the **trade stream** by default, by the same builder in live, replay and backtest, so all three
-agree on where a bar boundary falls; `maSource=1` switches to exchange klines, which are
-chart-exact but whose segment is legitimately empty in some prepared files. Params are numeric
-only (`Params` is `HashMap<String, f64>`): `maPeriod` (0 = off), `maMaxPeriod`, `maIntervalSec`,
-`maSource`, `maSlopeBars`, `maWarmupBars`. See `docs/moving-averages.md`.
+`Atr` and `Vwap` read more than the close, so a group holding one stays cold until it has seen bars
+carrying real range or volume — a close-only seed reports nothing rather than a confident zero.
 
-`ma_allows_entry` ANDs into the runner's `can_enter`, so an unwarmed series blocks **new entries
-only** — exits are never gated. Warmup is sized from the series *capacity*, not each trial's own
-period, so every trial in a sweep starts trading on the same bar.
+Kinds: `Sma`, `Ema`, `Rsi`, `Macd`/`MacdSignal`/`MacdHistogram`,
+`BollingerMid`/`Upper`/`Lower`, `Atr`, `Vwap`, `StdDev`. Outputs of one family share an instance,
+so asking for a MACD line and its signal computes one MACD. `lag` is a read offset, not a second
+indicator — on an SMA it is free, because the shared prefix-sum series already holds the history.
+
+Two properties this shape buys:
+
+- **A sweep pays once, not once per trial.** An indicator is a function of market data and never
+  of params, so identical declarations across 191 trials collapse to one instance. A grid *over
+  the period* is a different question: `Sma` 10…200 is one prefix-sum ring, `Ema` 10…200 is 191
+  recursions. SMA is the only kind with a closed form across periods — everything else depends on
+  its own previous value, so period 50 cannot be read out of state built for period 20.
+- **A new kind costs no ABI change.** Kinds are values, not fields. Reordering or removing one *does*: discriminants cross the boundary and no `offset_of!` observes them, so that case rides on the hand-bumped `INDICATOR_KIND_REVISION` — the same mechanism as `BATCH_TRAIT_REVISION` for the invisible vtable.
+- **A new *source* is not free.** `IndicatorSource` adds a feed method and a routing site in every driver (live, replay, scalar backtest, batch, shadow). That is the multi-repo change the design otherwise avoids.
+
+Warmup is a property of the whole declared set: `IndicatorSet::all_ready` ANDs into the runner's
+`can_enter`, gating **new entries only** — exits are never gated — and every trial in a sweep
+therefore starts trading on the same bar. See `engine/indicators/` and `engine/core/GATES.md`.
+
+`StrategyContext` implements `Default`, so a test writes
+`StrategyContext { book: Some(&t), ..Default::default() }`. Build it by full literal and the next
+SDK field breaks your repo — that is exactly what ABI 9's `ma` field did to four strategy repos.
 
 ## Profit Functions
 
@@ -470,6 +487,8 @@ cargo test                            # ~36 tests (profit, errors, types)
 ## Gotchas
 
 - **ABI version must match** between SDK and strategy. Bump `STRATEGY_ABI_VERSION` on any breaking change to Strategy/Action/FillEvent/StrategyPlugin — and bump `BATCH_TRAIT_REVISION` too when `BatchStrategy` gains or loses a method, defaulted or not.
+- **Never add a `StrategyContext` field without checking `Default` covers it.** The struct is built by literal in strategy test fixtures; `Default` is what keeps a new field from breaking every strategy repo. **Gate-shaped fields must default to the refusing value** — `can_enter` defaults to `false`, so a field someone forgets to populate blocks entries instead of waving them through. `Default` is for test and plugin fixtures only: the engine's own construction sites stay exhaustive literals, because that is the only thing forcing the runner to consider a new field.
+- **`IndicatorValue::COLD` is NaN, not zero.** A strategy that skips the `ready` check and writes `price > ma` compares against the raw value; against `0.0` every price is above a cold average and the filter admits everything. Every comparison against NaN is false, so the same bug refuses to trade instead.
 - **StrategyPlugin is `#[repr(C)]`** — never add non-FFI-safe fields.
 - **Strategy is `Send` but not `Sync`** — single-threaded per-symbol event loop. MarketAdapter is `Send + Sync` (shared via Arc).
 - **`&self` on MarketAdapter** means implementations must use interior mutability (Mutex/RwLock) for mutable state.
