@@ -5,7 +5,7 @@ mod trade;
 mod params;
 mod pair_info;
 mod market_data;
-pub mod ma;
+pub mod indicator;
 pub mod volume;
 pub mod profit;
 pub mod config;
@@ -17,8 +17,9 @@ pub use trade::*;
 pub use params::*;
 pub use pair_info::*;
 pub use market_data::*;
-pub use ma::{
-    ma_allows_entry, CandleBuilder, ClosedBars, MaConfig, MaFeed, MaSeries, MA_MAX_PERIOD,
+pub use indicator::{
+    IndicatorFamily, IndicatorInstanceKey, IndicatorKind, IndicatorRequest, IndicatorSource,
+    IndicatorValue,
 };
 pub use volume::{VolumeProfile, VolumeTracker};
 pub use profit::{

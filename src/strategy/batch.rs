@@ -4,7 +4,7 @@
 //! thousands of parameter variants per event in a single pass, enabling
 //! ~1000x throughput improvement over per-variant [`Strategy`] instances.
 
-use crate::types::{KlineEvent, TickerEvent, TradeEvent, Params, MarketType};
+use crate::types::{IndicatorRequest, TickerEvent, TradeEvent, Params, MarketType};
 use super::batch_exchange::BatchExchange;
 
 /// Hand-bumped whenever [`BatchStrategy`]'s method set changes.
@@ -14,7 +14,7 @@ use super::batch_exchange::BatchExchange;
 /// `const fn` can observe, so unlike the argument structs it cannot fold itself
 /// into [`super::abi::ABI_LAYOUT_FINGERPRINT`]. This constant does it by hand.
 /// Bump it in the same commit as any trait-method change, defaulted or not.
-pub const BATCH_TRAIT_REVISION: u32 = 2;
+pub const BATCH_TRAIT_REVISION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Config + Result
@@ -40,24 +40,6 @@ pub struct BatchConfig {
     /// Contract size for inverse contracts (e.g. 10 for BNBUSD_PERP).
     /// Ignored for linear/spot.
     pub contract_size: f64,
-    /// Capacity of the shared moving-average series — the largest `maPeriod`
-    /// anywhere in the trial grid. 0 disables MA entirely.
-    ///
-    /// One series serves *all* trials, because an MA depends only on market
-    /// data and never on parameters. That is what keeps indicator cost O(1) in
-    /// trial count: a 191-period sweep does the candle work once, not 191 times.
-    pub ma_max_period: usize,
-    /// Bar length for that series, in milliseconds.
-    pub ma_interval_ms: u32,
-    /// `false` (default): bars are aggregated from the trade stream, which is
-    /// present in every prepared file and matches what the live runner does.
-    /// `true`: bars come from the file's kline segment — chart-exact, but that
-    /// segment is legitimately empty in some prepared files, in which case the
-    /// series simply never warms up.
-    pub ma_from_klines: bool,
-    /// Bars to accumulate before [`BatchExchange::set_entry`] accepts an entry.
-    /// Sized from the grid maximum, not per trial — see that method.
-    pub ma_warmup_bars: usize,
 }
 
 impl Default for BatchConfig {
@@ -73,10 +55,6 @@ impl Default for BatchConfig {
             sl_delay_ms: 0,
             market_type: MarketType::Linear,
             contract_size: 0.0,
-            ma_max_period: 0,
-            ma_interval_ms: 60_000,
-            ma_from_klines: false,
-            ma_warmup_bars: 0,
         }
     }
 }
@@ -142,23 +120,27 @@ pub trait BatchStrategy: Send {
     /// Process a book ticker event across all trials (strategy-specific).
     fn process_ticker(&mut self, ticker: &TickerEvent);
 
+    /// Indicators this batch needs — the SoA counterpart of
+    /// [`Strategy::indicators`](super::Strategy::indicators).
+    ///
+    /// Declared once for the whole trial grid rather than per trial, which is
+    /// the point: an indicator depends only on market data, so 191 trials
+    /// asking for `Sma(20)` share one instance and the candle work happens
+    /// once. The driver owns the instances, feeds them from the same event
+    /// stream it dispatches here, and publishes the readings through
+    /// [`BatchExchange::set_indicators`] before each pass.
+    fn indicators(&self) -> Vec<IndicatorRequest> {
+        Vec::new()
+    }
+
     /// Check a trade event for entry fills and exit triggers across all trials.
     ///
-    /// Also advances the shared moving-average series, since with the default
-    /// (local) candle source the bars *are* the trade stream. An override must
-    /// still call `self.exchange_mut().check_trade(trade)` or the MA stops.
+    /// An override must still call `self.exchange_mut().check_trade(trade)`, or
+    /// fills stop being simulated.
     fn check_trade(&mut self, trade: &TradeEvent) {
         self.exchange_mut().check_trade(trade);
     }
 
-    /// Feed an exchange kline into the shared MA series.
-    ///
-    /// Only used when the run is configured for the exchange-kline candle
-    /// source; with the default local source the bars come from `check_trade`
-    /// and this is never called. Unclosed klines are ignored.
-    fn process_kline(&mut self, kline: &KlineEvent) {
-        self.exchange_mut().push_kline(kline);
-    }
     /// Force-close all open positions against the given book — longs at the
     /// bid, shorts at the ask. See [`BatchExchange::force_close_all`].
     fn force_close_all(&mut self, bid_price: f64, ask_price: f64) {

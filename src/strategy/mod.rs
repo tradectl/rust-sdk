@@ -2,7 +2,7 @@ pub mod abi;
 pub mod batch;
 pub mod batch_exchange;
 
-use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, MaSeries, OrderBookDepth, VolumeProfile};
+use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, IndicatorRequest, IndicatorValue, OrderBookDepth, VolumeProfile};
 pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchDiagnostics, BatchFactory, compute_score};
 pub use batch_exchange::BatchExchange;
 
@@ -201,16 +201,64 @@ pub struct StrategyContext<'a> {
     /// Empty when no entry orders are live. Single-entry strategies read
     /// `entry_orders.first()`; multi-slot strategies match on `EntryOrder::slot`.
     pub entry_orders: &'a [EntryOrder],
-    /// Moving averages for this symbol — `ma.value(p)` for any period up to the
-    /// series' capacity, plus `value_at` / `slope` / `cross` for bar history.
+    /// Readings for the indicators this strategy declared, in the order it
+    /// declared them — `indicators()[i]` answers `indicators()[i]` of the
+    /// request list. Prefer [`indicator`](Self::indicator), which hands back
+    /// `None` rather than a meaningless number while one is still cold.
     ///
-    /// Owned and fed by the engine, so the same bars are seen live and in
-    /// backtest and one series serves every sweep trial. Read it per event
-    /// rather than caching a value in strategy state.
+    /// Owned and fed by the engine, so live, replay and backtest see the same
+    /// bars and one instance serves every sweep trial. Read per event; never
+    /// cache a reading in strategy state.
     ///
-    /// `None` when no candle source is configured — `maPeriod` unset or 0, a
-    /// replay without a usable stream, or a unit test.
-    pub ma: Option<&'a MaSeries>,
+    /// Empty when the strategy declared none, and in unit tests built from
+    /// [`StrategyContext::default`].
+    pub indicators: &'a [IndicatorValue],
+}
+
+impl Default for StrategyContext<'_> {
+    /// A context with nothing in it.
+    ///
+    /// Exists so tests and helpers can write `StrategyContext { book: Some(&t),
+    /// ..Default::default() }`. Constructing this struct by full literal makes
+    /// every added field a breaking change for every strategy repo — which is
+    /// exactly what happened when `ma` was added, and cost four repos a PR
+    /// each for zero behaviour.
+    fn default() -> Self {
+        Self {
+            timestamp_ms: 0,
+            book: None,
+            positions: &[],
+            balance: 0.0,
+            unrealized_pnl: 0.0,
+            realized_pnl: 0.0,
+            trade_count: 0,
+            direction: Side::Long,
+            max_orders_reached: false,
+            depth: None,
+            volume: None,
+            can_enter: true,
+            entry_orders: &[],
+            indicators: &[],
+        }
+    }
+}
+
+impl StrategyContext<'_> {
+    /// The `i`th declared indicator's value, or `None` while it is cold or if
+    /// the strategy never declared that many.
+    #[inline]
+    pub fn indicator(&self, i: usize) -> Option<f64> {
+        self.indicators.get(i).and_then(IndicatorValue::get)
+    }
+
+    /// True when every declared indicator has warmed up. The runner ANDs this
+    /// into [`can_enter`](Self::can_enter), so a strategy does not normally
+    /// need to check it — it is here for logic that wants to distinguish "cold"
+    /// from "gated" itself.
+    #[inline]
+    pub fn indicators_ready(&self) -> bool {
+        self.indicators.iter().all(|v| v.ready)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +391,29 @@ pub trait Strategy: Send {
     }
 
     /// Parameter schema for UI/validation/sweep ranges.
+    /// Indicators this strategy needs, declared once at construction.
+    ///
+    /// The engine builds, feeds and shares exactly these; each event's readings
+    /// arrive in [`StrategyContext::indicators`] in this order, and an unwarmed
+    /// one suppresses new entries the same way any other gate does. A strategy
+    /// that wants none overrides nothing.
+    ///
+    /// Declare rather than compute: an indicator depends only on market data,
+    /// never on params, so identical declarations across a sweep's trials
+    /// collapse to a single instance. A strategy that builds its own keeps its
+    /// own copy in every trial instead.
+    ///
+    /// ```ignore
+    /// fn indicators(&self) -> Vec<IndicatorRequest> {
+    ///     let fast = IndicatorRequest::new(IndicatorKind::Sma, self.fast, 60);
+    ///     // …and the same average five bars back, for its slope.
+    ///     vec![fast, fast.lagged(5)]
+    /// }
+    /// ```
+    fn indicators(&self) -> Vec<IndicatorRequest> {
+        Vec::new()
+    }
+
     fn params_schema(&self) -> Vec<ParamDef> {
         vec![]
     }
@@ -425,7 +496,21 @@ pub struct StrategyPlugin {
 /// change is the one that *needs* a gate: nothing in the loader inspected the
 /// batch vtable before, so it now folds into the fingerprint too (see
 /// [`batch::BATCH_TRAIT_REVISION`]).
-pub const STRATEGY_ABI_VERSION: u32 = 9;
+///
+/// Bumped 9 → 10: replaced `StrategyContext::ma` with the general indicator
+/// boundary — `Strategy::indicators` declares [`IndicatorRequest`]s and
+/// `StrategyContext::indicators` carries [`IndicatorValue`] readings. The
+/// implementations moved out of this crate into `tradectl-indicators`, so v9's
+/// `MaSeries`/`MaConfig`/`MaFeed`/`CandleBuilder` and the `BatchConfig` MA
+/// fields are gone. Only plain data crosses the boundary now, which is what
+/// makes a *new indicator kind* cost no ABI change at all: it is a variant of
+/// [`IndicatorKind`] plus an implementation, not a new context field.
+///
+/// This is also the version that gave [`StrategyContext`] a `Default`. v9
+/// forced every strategy repo to touch its test fixtures purely because the
+/// context is built by literal; with `..Default::default()` available, a future
+/// field costs plugins nothing.
+pub const STRATEGY_ABI_VERSION: u32 = 10;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
