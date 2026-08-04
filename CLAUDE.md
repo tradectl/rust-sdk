@@ -349,7 +349,7 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | `Success` | AlreadyApplied | the caller's goal already holds — not an error |
 | `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
 | `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed, PositionNotSufficient | read the order back before deciding |
-| `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause |
+| `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause. **MaxOpenOrders is the exception** — a full book has no window to wait out, so it gets a throttled alert and nothing else |
 | `Amend` | ModifyLimitExceeded | cancel + place fresh |
 | `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded, InvalidRequest, NoDepth | 3-in-60s breaker → stop strategy |
 | `Resource` | InsufficientMargin | cancel entry + 60s pause; second strike stops |

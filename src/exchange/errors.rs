@@ -360,10 +360,12 @@ impl ApiErrorKind {
             // news; the call site treats it as the success it is.
             | Self::AlreadyApplied => true,
 
-            // A full order book cap is the rate mechanism's business and
-            // recurs constantly on a busy account; the operator hears about
-            // it through the pause, not per order.
-            Self::MaxOpenOrders => true,
+            // Loud since 2026-08-04. This used to claim the operator heard
+            // about it "through the pause" — there is no pause: nothing in
+            // the runner reads this kind, and no rate window drains a full
+            // order book. Silent, it fails entries on one symbol forever with
+            // nothing in the log to say why.
+            Self::MaxOpenOrders => false,
 
             Self::AmbiguousOutcome
             | Self::ServerBusy
@@ -952,6 +954,11 @@ mod tests {
             assert!(!kind(k).is_silent(), "{k:?} must alert");
             assert!(!kind(k).is_retryable(), "{k:?} must not be blindly retried");
         }
+        // MaxOpenOrders shares `Behaviour::Rate` with two silent kinds and was
+        // silent with them until 2026-08-04. The other two are covered in
+        // aggregate by the rate tracker; this one is covered by nothing, and a
+        // full book does not drain on a timer — so it has to speak for itself.
+        assert!(!kind(ApiErrorKind::MaxOpenOrders).is_silent(), "a full book must be heard");
     }
 
     #[test]
