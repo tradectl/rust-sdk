@@ -2,7 +2,7 @@ pub mod abi;
 pub mod batch;
 pub mod batch_exchange;
 
-use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, OrderBookDepth, VolumeProfile};
+use crate::types::{TickerEvent, TradeEvent, Side, Params, ParamDef, MaSeries, OrderBookDepth, VolumeProfile};
 pub use batch::{BatchStrategy, BatchConfig, BatchResult, BatchDiagnostics, BatchFactory, compute_score};
 pub use batch_exchange::BatchExchange;
 
@@ -201,6 +201,16 @@ pub struct StrategyContext<'a> {
     /// Empty when no entry orders are live. Single-entry strategies read
     /// `entry_orders.first()`; multi-slot strategies match on `EntryOrder::slot`.
     pub entry_orders: &'a [EntryOrder],
+    /// Moving averages for this symbol — `ma.value(p)` for any period up to the
+    /// series' capacity, plus `value_at` / `slope` / `cross` for bar history.
+    ///
+    /// Owned and fed by the engine, so the same bars are seen live and in
+    /// backtest and one series serves every sweep trial. Read it per event
+    /// rather than caching a value in strategy state.
+    ///
+    /// `None` when no candle source is configured — `maPeriod` unset or 0, a
+    /// replay without a usable stream, or a unit test.
+    pub ma: Option<&'a MaSeries>,
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +416,16 @@ pub struct StrategyPlugin {
 /// The version bump makes old (v7, fingerprint-less) plugins fail this integer
 /// check first — read at `#[repr(C)]` offset 0 — before the new tail fields are
 /// ever touched, so migration is fail-closed with no UB.
-pub const STRATEGY_ABI_VERSION: u32 = 8;
+///
+/// Bumped 8 → 9: added `StrategyContext::ma` (moving averages), `BatchConfig`
+/// MA capacity fields, and the defaulted `BatchStrategy::process_kline` hook.
+/// The context change alone already shifts [`abi::ABI_LAYOUT_FINGERPRINT`], so
+/// a stale plugin is refused either way — the bump is what makes the failure
+/// say "rebuild" instead of printing two fingerprint hexes. The batch-boundary
+/// change is the one that *needs* a gate: nothing in the loader inspected the
+/// batch vtable before, so it now folds into the fingerprint too (see
+/// [`batch::BATCH_TRAIT_REVISION`]).
+pub const STRATEGY_ABI_VERSION: u32 = 9;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}

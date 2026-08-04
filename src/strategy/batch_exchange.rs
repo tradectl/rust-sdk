@@ -6,7 +6,7 @@
 //! `process_ticker()`. Everything else — fill scheduling, exit checks, metrics —
 //! is handled here.
 
-use crate::types::{TradeEvent, MarketType};
+use crate::types::{CandleBuilder, KlineEvent, MaSeries, TradeEvent, MarketType};
 use super::batch::{BatchConfig, BatchResult, BatchDiagnostics};
 
 /// SoA batch exchange engine. Owns all position state, fill logic, and metrics.
@@ -25,6 +25,19 @@ pub struct BatchExchange {
     sl_delay_ms: u64,
     pub market_type: MarketType,
     pub contract_size: f64,
+
+    // ── Moving averages: ONE series for all N trials ─────────────────
+    /// Shared moving-average series. An MA is a function of market data only —
+    /// never of trial parameters — so every trial reads the same bars and the
+    /// indicator cost is O(1) in trial count rather than O(N). Read it as
+    /// `self.exchange.ma.value(period)` inside the per-trial loop.
+    ///
+    /// Empty (capacity 1, never fed) when `BatchConfig::ma_max_period` is 0.
+    pub ma: MaSeries,
+    ma_candles: CandleBuilder,
+    ma_enabled: bool,
+    ma_from_klines: bool,
+    ma_warmup_bars: u64,
 
     // ── Pending entry state (per trial) ──────────────────────────────
     /// Pending entry price. 0.0 = no pending entry.
@@ -96,6 +109,11 @@ impl BatchExchange {
             sl_delay_ms: config.sl_delay_ms,
             market_type: config.market_type,
             contract_size: config.contract_size,
+            ma: MaSeries::new(config.ma_max_period.max(1), config.ma_interval_ms),
+            ma_candles: CandleBuilder::new(config.ma_interval_ms),
+            ma_enabled: config.ma_max_period > 0,
+            ma_from_klines: config.ma_from_klines,
+            ma_warmup_bars: config.ma_warmup_bars as u64,
             entry_price: vec![0.0; n],
             pending_tp_price: vec![0.0; n],
             pending_sl_price: vec![0.0; n],
@@ -145,6 +163,15 @@ impl BatchExchange {
     /// Applies placement latency + jitter. Strategy computes TP/SL from its params.
     #[inline(always)]
     pub fn set_entry(&mut self, trial: usize, price: f64, tp_price: f64, sl_price: f64, ts: u64, is_short: bool) {
+        // MA warmup is enforced here rather than left to each strategy, and it
+        // is sized from the series *capacity* — i.e. the grid maximum — so every
+        // trial in a sweep starts trading on the same bar. Per-trial warmup
+        // would let short periods trade hours earlier, and `compute_score`
+        // multiplies by trade count, so they would win the sweep on warmup
+        // rather than on edge.
+        if !self.ma_warm() {
+            return;
+        }
         self.entry_price[trial] = price;
         self.pending_tp_price[trial] = tp_price;
         self.pending_sl_price[trial] = sl_price;
@@ -167,6 +194,13 @@ impl BatchExchange {
     pub fn check_trade(&mut self, trade: &TradeEvent) {
         let price = trade.price;
         let ts = trade.timestamp_ms;
+
+        // Advance the shared MA before the per-trial loop, so every trial in
+        // this pass reads the same bars. Two disjoint field borrows.
+        if self.ma_enabled && !self.ma_from_klines {
+            self.ma_candles.feed(ts, price, &mut self.ma);
+        }
+
         let n = self.n;
         let mp = self.max_positions;
         let _latency = self.latency_ms;
@@ -408,6 +442,21 @@ impl BatchExchange {
     }
 
     /// Estimated heap memory usage in bytes for all trial arrays.
+    /// Whether the shared MA has enough bars for trials to start entering.
+    /// Always true when MA is disabled.
+    #[inline(always)]
+    pub fn ma_warm(&self) -> bool {
+        !self.ma_enabled || self.ma.bars() >= self.ma_warmup_bars
+    }
+
+    /// Feed an exchange kline into the shared MA series. Ignored unless the run
+    /// is configured for the kline candle source; unclosed klines are skipped.
+    pub fn push_kline(&mut self, kline: &KlineEvent) {
+        if self.ma_enabled && self.ma_from_klines && kline.closed != 0 {
+            self.ma.push_close(kline.close);
+        }
+    }
+
     pub fn estimated_ram_bytes(&self) -> usize {
         let n = self.n;
         let slots = n * self.max_positions;
@@ -422,6 +471,14 @@ impl BatchExchange {
         let per_slot_u64 = 1; // pos_sl_active_at
         let per_slot_u8 = 2; // pos_active, pos_is_short
 
+        // The MA series is shared by all trials — its two f64 rings plus the
+        // reciprocal table are counted once, not per trial. 3.2 KB at 200.
+        let ma_bytes = if self.ma_enabled {
+            (self.ma.max_period() + 1) * 8 * 3
+        } else {
+            0
+        };
+
         n * (per_trial_f64 + per_trial_f64_metrics) * 8
             + n * per_trial_u64 * 8
             + n * per_trial_u32 * 4
@@ -429,9 +486,17 @@ impl BatchExchange {
             + slots * per_slot_f64 * 8
             + slots * per_slot_u64 * 8
             + slots * per_slot_u8
+            + ma_bytes
     }
 
     /// Reset all state for a new evaluation window.
+    /// Reset all *trial* state for a new evaluation window (shadow mode).
+    ///
+    /// Deliberately leaves [`ma`](Self::ma) alone: it holds market history, not
+    /// trial state, and clearing it every window would re-run the warmup on
+    /// each one — which biases scoring toward short periods, since a series
+    /// that is not ready yet produces no trades and `compute_score` multiplies
+    /// by the trade count.
     pub fn reset(&mut self) {
         self.entry_price.fill(0.0);
         self.pending_tp_price.fill(0.0);

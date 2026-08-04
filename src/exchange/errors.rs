@@ -1,5 +1,16 @@
 use std::fmt;
 
+/// Ceiling on a parsed ban duration ([`ExchangeApiError::ban_duration`]).
+///
+/// An **overflow guard, not a policy**: it sits above Binance's documented
+/// maximum ban (3 days) on purpose. Clamping below the real maximum would turn
+/// every call during a longer ban into `now + MAX` — a fresh, later instant
+/// each time — and pause deadlines are taken as a max, so the deadline would
+/// walk forward one health tick at a time for the length of the ban and stay
+/// dark for a further `MAX` after it lifted. Keeping the ceiling above anything
+/// the venue can legitimately send keeps the pause idempotent on the real path.
+pub const MAX_BAN_PAUSE: std::time::Duration = std::time::Duration::from_secs(7 * 86_400);
+
 /// Classified exchange API error.
 ///
 /// The venue-neutral vocabulary the runner reasons about. Each adapter maps
@@ -349,10 +360,12 @@ impl ApiErrorKind {
             // news; the call site treats it as the success it is.
             | Self::AlreadyApplied => true,
 
-            // A full order book cap is the rate mechanism's business and
-            // recurs constantly on a busy account; the operator hears about
-            // it through the pause, not per order.
-            Self::MaxOpenOrders => true,
+            // Loud since 2026-08-04. This used to claim the operator heard
+            // about it "through the pause" — there is no pause: nothing in
+            // the runner reads this kind, and no rate window drains a full
+            // order book. Silent, it fails entries on one symbol forever with
+            // nothing in the log to say why.
+            Self::MaxOpenOrders => false,
 
             Self::AmbiguousOutcome
             | Self::ServerBusy
@@ -603,6 +616,34 @@ impl ExchangeApiError {
         self.behaviour() == Behaviour::Retry
     }
 
+    /// How long an [`IpBanned`](ApiErrorKind::IpBanned) error says to stay off
+    /// the venue, from the unban epoch the message carries
+    /// (`"…IP(1.2.3.4) banned until 1774784983833."`). `None` for any other
+    /// kind, or when the message carries no parseable epoch.
+    ///
+    /// Reading the message is confined to this one kind, which already knows
+    /// its own wording — every consumer of a ban needs the duration, and the
+    /// alternative is each of them guessing a fixed pause.
+    pub fn ban_duration(&self) -> Option<std::time::Duration> {
+        if self.kind != ApiErrorKind::IpBanned {
+            return None;
+        }
+        let idx = self.message.find("banned until ")? + "banned until ".len();
+        let end = self.message[idx..].find(|c: char| !c.is_ascii_digit())?;
+        let epoch_ms: u64 = self.message[idx..idx + end].parse().ok()?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if epoch_ms > now_ms {
+            Some(std::time::Duration::from_millis(epoch_ms - now_ms).min(MAX_BAN_PAUSE))
+        } else {
+            // Already expired by our clock. Our clock may be the wrong one, so
+            // wait a window rather than resuming into the same ban.
+            Some(std::time::Duration::from_secs(60))
+        }
+    }
+
     /// The audit line for the code → kind → behaviour mapping, one per error
     /// occurrence. Census: `grep -F '[decision]' bot.log | sort | uniq -c`.
     pub fn decision_line(&self) -> String {
@@ -658,6 +699,35 @@ impl std::error::Error for ExchangeApiError {}
 /// Downcast an `ExchangeError` to `ExchangeApiError` if possible.
 pub fn classify<'a>(err: &'a (dyn std::error::Error + Send + Sync + 'static)) -> Option<&'a ExchangeApiError> {
     err.downcast_ref::<ExchangeApiError>()
+}
+
+/// The classified form of a boxed adapter error — always, by owning a copy.
+///
+/// [`classify`] answers `None` when an adapter broke the "every error an
+/// adapter returns is an `ExchangeApiError`" rule. A caller that must decide
+/// *something* — close or don't close, retry or page — cannot act on `None`,
+/// and the historical response to that was to format the error into a string
+/// and lose it. This mints the `Unknown` policy instead, so an untyped error
+/// still reaches a mechanism.
+///
+/// It also logs at error level, because reaching the fallback means an adapter
+/// is violating the invariant `engine/exchange/tests/error_classification.rs`
+/// exists to enforce, and that is a defect in the adapter, not in the caller.
+pub fn classify_owned(err: &(dyn std::error::Error + Send + Sync + 'static)) -> ExchangeApiError {
+    if let Some(api) = classify(err) {
+        return api.clone();
+    }
+    log::error!(
+        "untyped exchange error reached a classifying caller — the adapter must return \
+         ExchangeApiError: {err}"
+    );
+    ExchangeApiError {
+        kind: ApiErrorKind::Unknown,
+        code: 0,
+        message: err.to_string(),
+        endpoint: "unknown".into(),
+        http_status: 0,
+    }
 }
 
 
@@ -721,6 +791,77 @@ mod tests {
         let err = ExchangeApiError::network("connection refused", "POST /order".into());
         assert_eq!(err.kind, ApiErrorKind::Network);
         assert!(err.is_retryable());
+    }
+
+    /// `classify_owned` must always yield a kind. The whole reason it exists
+    /// is that a caller holding `None` has nothing to act on, so an adapter
+    /// that broke the invariant used to silently disable every mechanism
+    /// downstream of it.
+    #[test]
+    fn classify_owned_always_produces_a_kind() {
+        let typed: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(ExchangeApiError::network("connection refused", "POST /order".into()));
+        let got = classify_owned(&*typed);
+        assert_eq!(got.kind, ApiErrorKind::Network, "a typed error keeps its own kind");
+        assert_eq!(got.endpoint, "POST /order");
+
+        // The shape the invariant forbids: `format!(..).into()`.
+        let untyped: Box<dyn std::error::Error + Send + Sync> = "something went wrong".into();
+        let got = classify_owned(&*untyped);
+        assert_eq!(got.kind, ApiErrorKind::Unknown, "an untyped error gets the Unknown policy");
+        assert_eq!(got.behaviour(), Behaviour::Unknown);
+        assert_eq!(got.message, "something went wrong", "the wording still reaches the operator");
+    }
+
+    /// The unban epoch is read for `IpBanned` and for nothing else — every
+    /// other kind's message is not a ban and must not be mined for one.
+    #[test]
+    fn ban_duration_reads_only_an_ip_ban() {
+        let ban = |msg: &str| ExchangeApiError {
+            kind: ApiErrorKind::IpBanned,
+            code: -1003,
+            message: msg.into(),
+            endpoint: "POST /fapi/v1/order".into(),
+            http_status: 418,
+        };
+
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 120_000;
+        let d = ban(&format!("Way too many requests; IP(1.2.3.4) banned until {future}."))
+            .ban_duration()
+            .expect("a future epoch parses");
+        assert!(d.as_secs() > 100 && d.as_secs() <= 120, "{d:?}");
+
+        // Venue-controlled text: nanoseconds where millis are expected would
+        // otherwise become a Duration of millions of years.
+        assert_eq!(
+            ban("IP(1.2.3.4) banned until 99999999999999999999.").ban_duration(),
+            None,
+            "an epoch too large to parse as u64 yields no duration rather than a guess",
+        );
+        assert_eq!(
+            ban(&format!("IP(1.2.3.4) banned until {}.", u64::MAX)).ban_duration(),
+            Some(MAX_BAN_PAUSE),
+            "an absurd but parseable epoch is clamped, never overflowed",
+        );
+        assert_eq!(
+            ban("IP(1.2.3.4) banned until 1.").ban_duration(),
+            Some(std::time::Duration::from_secs(60)),
+            "an already-expired ban still waits a window — our clock may be the wrong one",
+        );
+        assert_eq!(ban("Way too many requests.").ban_duration(), None, "no epoch, no duration");
+
+        let rate = ExchangeApiError {
+            kind: ApiErrorKind::RateLimited,
+            code: -1003,
+            message: "Way too many requests; IP(1.2.3.4) banned until 99999999999999.".into(),
+            endpoint: "POST /fapi/v1/order".into(),
+            http_status: 429,
+        };
+        assert_eq!(rate.ban_duration(), None, "only IpBanned carries a ban, whatever the wording");
     }
 
     #[test]
@@ -813,6 +954,11 @@ mod tests {
             assert!(!kind(k).is_silent(), "{k:?} must alert");
             assert!(!kind(k).is_retryable(), "{k:?} must not be blindly retried");
         }
+        // MaxOpenOrders shares `Behaviour::Rate` with two silent kinds and was
+        // silent with them until 2026-08-04. The other two are covered in
+        // aggregate by the rate tracker; this one is covered by nothing, and a
+        // full book does not drain on a timer — so it has to speak for itself.
+        assert!(!kind(ApiErrorKind::MaxOpenOrders).is_silent(), "a full book must be heard");
     }
 
     #[test]

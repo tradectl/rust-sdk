@@ -80,6 +80,7 @@ pub struct StrategyContext<'a> {
     pub max_orders_reached: bool,             // exchange order limit hit
     pub can_enter: bool,                      // runner will accept a fresh PlaceEntry now
     pub entry_orders: &'a [EntryOrder],       // this symbol's live entry orders (runner-tracked)
+    pub ma: Option<&'a MaSeries>,             // moving averages, engine-owned (None when maPeriod is 0)
 }
 ```
 
@@ -174,7 +175,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 7;
+pub const STRATEGY_ABI_VERSION: u32 = 9;
 
 #[repr(C)]
 pub struct StrategyPlugin {
@@ -183,8 +184,20 @@ pub struct StrategyPlugin {
     pub name_len: usize,
     pub factory: StrategyFactory,                    // fn(&Params) -> Box<dyn Strategy>
     pub batch_factory: Option<BatchFactory>,          // fn(&[Params], &BatchConfig, usize) -> Box<dyn BatchStrategy>
+    pub abi_fingerprint: u64,                         // const layout hash of every boundary type
+    pub rustc_version: *const u8,                     // diagnostics; read only after abi_version matches
+    pub rustc_version_len: usize,
+    pub sdk_version: *const u8,
+    pub sdk_version_len: usize,
 }
 ```
+
+Three load gates (`strategy/abi.rs` `check_plugin_abi`), in order: `abi_version` (offset 0,
+safe to read on any plugin) → `rustc_version` (the load-bearing one — Rust has no stable ABI
+across compiler versions) → `abi_fingerprint`. The fingerprint folds `size_of`/`align_of`/
+`offset_of!` of every boundary type, **including the batch boundary** (`BatchConfig`,
+`BatchResult`, `BatchDiagnostics`, `BatchExchange`) as of v9. A `BatchStrategy` *method* change
+has no observable layout, so it rides on the hand-bumped `BATCH_TRAIT_REVISION`.
 
 **Macros:**
 ```rust
@@ -203,7 +216,8 @@ pub trait BatchStrategy: Send {
     fn exchange(&self) -> &BatchExchange;
     fn exchange_mut(&mut self) -> &mut BatchExchange;
     fn process_ticker(&mut self, ticker: &TickerEvent);      // required — strategy logic
-    fn check_trade(&mut self, trade: &TradeEvent) { ... }    // delegates to exchange
+    fn check_trade(&mut self, trade: &TradeEvent) { ... }    // delegates to exchange; also advances the shared MA
+    fn process_kline(&mut self, kline: &KlineEvent) { ... }  // MA bars when maSource=1
     fn force_close_all(&mut self, bid_price: f64, ask_price: f64) { ... }  // longs at bid, shorts at ask
     fn results(&self) -> Vec<BatchResult> { ... }
     fn trial_count(&self) -> usize { ... }
@@ -275,6 +289,40 @@ pub trait MarketAdapter: Send + Sync {
 }
 ```
 
+## Moving averages (`types/ma.rs`)
+
+`MaSeries` answers `value(p)` for **every** period at once — one ring of closes plus one ring of
+prefix sums, so an update is 1 store + 1 add and a read is 1 subtract + 1 multiply regardless of
+how many periods anyone asks for. That is what makes a 191-period sweep affordable: an MA depends
+only on market data, never on params, so **one series serves every trial** and indicator cost is
+O(1) in trial count.
+
+Only the arithmetic mean (what charts call SMA) is implemented, and deliberately — it is the only
+common MA with a closed form across periods. EMA/HMA are recursive and would need an explicit
+period list and a pass per period per bar.
+
+```rust
+ma.value(50)          // MA of the last 50 closed bars; None until 50 exist
+ma.value_live(50)     // includes the forming bar — chatters, use deliberately
+ma.value_at(50, 5)    // MA(50) as of 5 bars ago       (needs 50+5 capacity)
+ma.slope(50, 5)       // value(50) - value_at(50, 5)
+ma.cross(50, 200)     // 1 = crossed up this bar, -1 = down, 0 = no cross
+```
+
+Read it every event; never cache a value in strategy state (that is the desync class that killed
+the pending-entry latch — see `entry_orders` above).
+
+Engines own the feeding via `MaFeed` (config + series + `CandleBuilder`). Bars are aggregated from
+the **trade stream** by default, by the same builder in live, replay and backtest, so all three
+agree on where a bar boundary falls; `maSource=1` switches to exchange klines, which are
+chart-exact but whose segment is legitimately empty in some prepared files. Params are numeric
+only (`Params` is `HashMap<String, f64>`): `maPeriod` (0 = off), `maMaxPeriod`, `maIntervalSec`,
+`maSource`, `maSlopeBars`, `maWarmupBars`. See `docs/moving-averages.md`.
+
+`ma_allows_entry` ANDs into the runner's `can_enter`, so an unwarmed series blocks **new entries
+only** — exits are never gated. Warmup is sized from the series *capacity*, not each trial's own
+period, so every trial in a sweep starts trading on the same bar.
+
 ## Profit Functions
 
 Three standalone pure functions (not on a struct):
@@ -301,7 +349,7 @@ reason. Coverage design: `engine/exchange/ERROR-COVERAGE-PLAN.md`.
 | `Success` | AlreadyApplied | the caller's goal already holds — not an error |
 | `Retry` | ServerBusy, Network, RateLimited | bounded retry with backoff; same clientOrderId |
 | `Reconcile` | AmbiguousOutcome, CancelReplacePartial, CancelReplaceFailed, PositionNotSufficient | read the order back before deciding |
-| `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause |
+| `Rate` | TooManyOrders, IpBanned, MaxOpenOrders | `ApiLimitTracker` / ban-duration pause. **MaxOpenOrders is the exception** — a full book has no window to wait out, so it gets a throttled alert and nothing else |
 | `Amend` | ModifyLimitExceeded | cancel + place fresh |
 | `Bug` | PrecisionError, QuantityExceeded, MinNotional, MaxPositionExceeded, InvalidRequest, NoDepth | 3-in-60s breaker → stop strategy |
 | `Resource` | InsufficientMargin | cancel entry + 60s pause; second strike stops |
@@ -421,7 +469,7 @@ cargo test                            # ~36 tests (profit, errors, types)
 
 ## Gotchas
 
-- **ABI version must match** between SDK and strategy. Bump `STRATEGY_ABI_VERSION` on any breaking change to Strategy/Action/FillEvent/StrategyPlugin.
+- **ABI version must match** between SDK and strategy. Bump `STRATEGY_ABI_VERSION` on any breaking change to Strategy/Action/FillEvent/StrategyPlugin — and bump `BATCH_TRAIT_REVISION` too when `BatchStrategy` gains or loses a method, defaulted or not.
 - **StrategyPlugin is `#[repr(C)]`** — never add non-FFI-safe fields.
 - **Strategy is `Send` but not `Sync`** — single-threaded per-symbol event loop. MarketAdapter is `Send + Sync` (shared via Arc).
 - **`&self` on MarketAdapter** means implementations must use interior mutability (Mutex/RwLock) for mutable state.
