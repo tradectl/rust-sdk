@@ -15,7 +15,15 @@
 //!
 //! - **A sweep pays for an indicator once, not once per trial.** Identical
 //!   requests across trials collapse to one instance, because an indicator
-//!   depends only on market data and never on params.
+//!   depends only on market data and never on params. Note what that does and
+//!   does not cover: 191 trials all asking for `Ema(20)` share one instance,
+//!   but a grid *over the period* — `Ema(10)`…`Ema(200)` — is 191 distinct
+//!   computations and costs 191. [`IndicatorKind::Sma`] is the exception, and
+//!   for a mathematical reason rather than an optimisation: it is the only kind
+//!   with a closed form across periods, so one prefix-sum ring answers all of
+//!   them. Everything else is recursive — each value depends on the previous
+//!   one *for that period* — so period 50 cannot be read out of state built for
+//!   period 20.
 //! - **Adding an indicator kind costs no ABI change.** The kinds are values of
 //!   [`IndicatorKind`], not fields; a new one is an implementation in
 //!   `tradectl-indicators` plus a variant here.
@@ -31,10 +39,16 @@
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndicatorKind {
-    /// Simple moving average. Served from a shared prefix-sum series, so every
-    /// period and lag on one interval costs a single ring.
+    /// Simple moving average — the arithmetic mean of the last `period` closes.
+    ///
+    /// The only kind with a closed form across periods, so the engine serves
+    /// every SMA period *and* lag on one interval from a single prefix-sum
+    /// ring. See the note on sharing above: this is the one family where a
+    /// period grid is free.
     Sma = 0,
+    /// Exponential moving average, `k = 2/(period+1)`.
     Ema = 1,
+    /// Relative strength index, Wilder-smoothed. 0…100.
     Rsi = 2,
     /// Moving-average convergence/divergence line (fast EMA − slow EMA).
     /// `period` = fast, `aux_a` = slow, `aux_b` = signal.
@@ -43,14 +57,22 @@ pub enum IndicatorKind {
     MacdSignal = 4,
     /// MACD line − signal line.
     MacdHistogram = 5,
-    /// Bollinger middle band (the simple average). `aux_a` = σ × 100.
+    /// Bollinger middle band — the simple average. `aux_a` = σ × 100
+    /// (`0` means the conventional 2σ).
     BollingerMid = 6,
+    /// Middle band + σ × the multiplier.
     BollingerUpper = 7,
+    /// Middle band − σ × the multiplier.
     BollingerLower = 8,
     /// Average true range, over each bar's high/low/close.
+    ///
+    /// Needs the bar's range, so a seeded (close-only) history leaves it warm
+    /// but flat until live bars replace the seed.
     Atr = 9,
-    /// Volume-weighted average price, cumulative over the run.
+    /// Volume-weighted average price, cumulative over the run. Like `Atr`, it
+    /// reads more than the close — a close-only seed carries no volume.
     Vwap = 10,
+    /// Population standard deviation of the last `period` closes.
     StdDev = 11,
 }
 

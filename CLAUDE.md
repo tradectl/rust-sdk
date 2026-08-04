@@ -315,7 +315,10 @@ indicator — on an SMA it is free, because the shared prefix-sum series already
 Two properties this shape buys:
 
 - **A sweep pays once, not once per trial.** An indicator is a function of market data and never
-  of params, so identical declarations across 191 trials collapse to one instance.
+  of params, so identical declarations across 191 trials collapse to one instance. A grid *over
+  the period* is a different question: `Sma` 10…200 is one prefix-sum ring, `Ema` 10…200 is 191
+  recursions. SMA is the only kind with a closed form across periods — everything else depends on
+  its own previous value, so period 50 cannot be read out of state built for period 20.
 - **A new kind costs no ABI change.** Kinds are values, not fields.
 
 Warmup is a property of the whole declared set: `IndicatorSet::all_ready` ANDs into the runner's
