@@ -363,6 +363,16 @@ pub struct ApiConfig {
     /// `positionSide=LONG/SHORT`.
     #[serde(default)]
     pub hedge_mode: Option<bool>,
+    /// Which of the venue's environments to trade against: `"live"` (the
+    /// default), `"demo"` or `"testnet"`.
+    ///
+    /// Three-way rather than a `testnet` bool because the two rehearsal
+    /// environments are not interchangeable: Bybit's demo trading carries
+    /// real market data with simulated fills, while its testnet's books are
+    /// empty, so a strategy rehearsed on testnet has been rehearsed against
+    /// nothing. Bybit only; other adapters ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -377,6 +387,7 @@ impl Default for ApiConfig {
             ws: false,
             auto_adjust_leverage: false,
             hedge_mode: None,
+            env: None,
         }
     }
 }

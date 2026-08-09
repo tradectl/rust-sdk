@@ -249,6 +249,11 @@ impl MarketAdapter for TestExchange {
         Ok(())
     }
 
+    async fn unsubscribe_pairs(&self, _symbols: &[String]) -> ExchangeResult<()> {
+        // No stream machinery to drop; pairs stay loaded.
+        Ok(())
+    }
+
     // ── Market Data (Pull) ───────────────────────────────────────
 
     fn get_book_ticker(&self, symbol: &str) -> Option<BookTicker> {

@@ -80,6 +80,19 @@ pub trait MarketAdapter: Send + Sync {
     fn get_pair_info(&self, symbol: &str) -> Option<PairInfo>;
     async fn load_pair(&self, symbol: &str) -> ExchangeResult<PairInfo>;
     async fn subscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()>;
+    /// Drop the market-data streams for `symbols` — the inverse of
+    /// [`subscribe_pairs`](Self::subscribe_pairs).
+    ///
+    /// Exists because subscriptions otherwise only ever accumulate: the pair
+    /// selector's rotation drops leaked every WS stream until restart (217
+    /// subscribed vs ~6 traded on prod, 2026-08), and on a venue hosted in
+    /// the same cloud region both directions of that dead traffic are billed.
+    ///
+    /// Venues with no unsubscribe path yet return `Ok(())` explicitly — the
+    /// streams keep flowing until reconnect/restart, and the caller must not
+    /// treat `Ok` as proof the bytes stopped. Registered `on_*` callbacks are
+    /// NOT touched: deregistration stays the `off_*` family's job.
+    async fn unsubscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()>;
 
     // ── Market Data (Pull) ───────────────────────────────────────
     fn get_book_ticker(&self, symbol: &str) -> Option<BookTicker>;
