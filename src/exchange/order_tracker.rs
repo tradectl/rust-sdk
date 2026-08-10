@@ -239,7 +239,6 @@ impl OrderTracker {
                     // the first edit, so a chasing strategy reading it would re-chase
                     // every tick.
                     price: meta.entry_price,
-                    size: order.quantity,
                     filled: order.filled_quantity,
                 })
             })
@@ -426,7 +425,10 @@ mod tests {
         assert_eq!(got[0].slot, None, "single-entry \"_\" sentinel maps back to None");
         assert_eq!(got[0].side, Side::Long, "Buy → Long");
         assert_eq!(got[0].price, 100.0);
-        assert_eq!(got[0].size, 2.0);
+        // `filled` still comes off the raw `Order`, and correctly so — fills
+        // do write `filled_quantity` back. `size` used to sit beside it
+        // reading `Order.quantity`, which nothing writes back; it was removed
+        // rather than fixed (ABI 11) because no strategy read it.
         assert_eq!(got[0].filled, 0.5);
 
         assert_eq!(got[1].slot.as_deref(), Some("a"), "named slot preserved");

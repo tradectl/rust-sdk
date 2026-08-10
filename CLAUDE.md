@@ -91,11 +91,17 @@ pub struct StrategyContext<'a> {
 pub struct EntryOrder {
     pub slot: Option<String>,    // entry_id the strategy assigned (None = single-entry)
     pub side: Side,
-    pub price: f64,              // resting limit price
-    pub size: f64,              // original quantity
-    pub filled: f64,            // cumulative filled (0.0 until a partial fill)
+    pub price: f64,              // resting limit price — CURRENT, updated on every chase-edit
+    pub filled: f64,             // cumulative filled (0.0 until a partial fill)
 }
 ```
+
+**There is no `size`.** It reported `Order.quantity`, which is frozen at placement and never
+written back, so it was correct until the first chase and wrong forever after — on inverse from
+the first chase always, since contracts are derived from price. `price` beside it was current, so
+one struct reported two different points in time. Removed in ABI 11 rather than fixed: no strategy
+read it. If you need the live resting size, it is not available here — say so rather than reviving
+a field that lies.
 
 ### FillEvent / FillResponse
 ```rust
@@ -176,7 +182,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 10;
+pub const STRATEGY_ABI_VERSION: u32 = 11;
 
 #[repr(C)]
 pub struct StrategyPlugin {
