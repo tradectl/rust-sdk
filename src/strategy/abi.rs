@@ -134,7 +134,6 @@ const fn compute_fingerprint() -> u64 {
     h = mix(h, offset_of!(EntryOrder, slot) as u64);
     h = mix(h, offset_of!(EntryOrder, side) as u64);
     h = mix(h, offset_of!(EntryOrder, price) as u64);
-    h = mix(h, offset_of!(EntryOrder, size) as u64);
     h = mix(h, offset_of!(EntryOrder, filled) as u64);
 
     // -- ExitOrder --

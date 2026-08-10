@@ -61,10 +61,15 @@ pub struct EntryOrder {
     pub slot: Option<String>,
     /// Order side.
     pub side: Side,
-    /// Limit price of the resting order.
+    /// Limit price of the resting order. Current: the runner updates it on
+    /// every chase-edit.
+    ///
+    /// There is deliberately no `size` here. It reported `Order.quantity`,
+    /// which is frozen at placement and never written back, so it went stale
+    /// on the first chase — on inverse always, since contracts are derived
+    /// from price. A field that is right once and wrong forever after is worse
+    /// than an absent one, and nothing read it (ABI 11).
     pub price: f64,
-    /// Original order quantity.
-    pub size: f64,
     /// Cumulative filled quantity. `0.0` until a (partial) fill arrives, letting
     /// partial-fill-aware strategies react without tracking it themselves.
     pub filled: f64,
@@ -538,7 +543,7 @@ pub struct StrategyPlugin {
 /// forced every strategy repo to touch its test fixtures purely because the
 /// context is built by literal; with `..Default::default()` available, a future
 /// field costs plugins nothing.
-pub const STRATEGY_ABI_VERSION: u32 = 10;
+pub const STRATEGY_ABI_VERSION: u32 = 11;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}
