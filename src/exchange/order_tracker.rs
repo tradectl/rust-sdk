@@ -23,6 +23,11 @@ pub struct EntryMetadata {
     pub cum_filled_qty: f64,
     /// Entry price recorded at placement time (used by chase-edit logic).
     pub entry_price: f64,
+    /// Quantity currently resting — the twin of `entry_price`, maintained
+    /// across chase edits for the same reason. On inverse this changes on
+    /// *every* chase: quantity there is contracts, `size * price /
+    /// contract_size`. `0.0` means "not known", never a real size.
+    pub entry_qty: f64,
 }
 
 /// In-memory order state manager. Tracks orders across all trading pairs.
@@ -53,9 +58,10 @@ impl OrderTracker {
         self.orders.get(symbol)?.get(client_order_id)
     }
 
-    pub fn get_order_mut(&mut self, symbol: &str, client_order_id: &str) -> Option<&mut Order> {
-        self.orders.get_mut(symbol)?.get_mut(client_order_id)
-    }
+    // No `get_order_mut`. A tracked `Order` is the placement record and is
+    // never written back; everything that changes across a chase lives in
+    // `EntryMetadata` (`entry_price`, `entry_qty`). Handing out `&mut Order`
+    // would make that a convention instead of a property.
 
     pub fn get_orders_by_symbol(&self, symbol: &str) -> Option<&HashMap<String, Order>> {
         self.orders.get(symbol)
@@ -371,6 +377,7 @@ mod tests {
             fire_once_fill: false,
             cum_filled_qty: 0.0,
             entry_price: 50000.0,
+            entry_qty: 0.1,
         };
         tracker.track_entry(order, meta);
 
