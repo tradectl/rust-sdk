@@ -91,13 +91,20 @@ pub struct PositionSnapshot {
     /// at the unprotected-time cap.
     #[serde(default)]
     pub virtual_sl: bool,
-    /// Exchange order id of the resting stop backing `sl_price` (empty for a
-    /// virtual or not-yet-placed stop). Forwarded to the watchdog via
-    /// `/v1/intent` so it can match the declared stop to a real open order.
+    /// Id of the resting stop backing `sl_price` (empty for a virtual or
+    /// not-yet-placed stop). Forwarded to the watchdog via `/v1/intent` so it
+    /// can match the declared stop to a real open order.
+    ///
+    /// This is the runner's own **client** order id (`<position_id>_sl`), which
+    /// it sends as `clientOrderId` — NOT the venue's numeric `orderId`. A
+    /// consumer must match it against `Order::client_order_id`, or against
+    /// either id; matching `Order::order_id` alone finds nothing. (Prod
+    /// 2026-08-03: the watchdog compared only `order_id`, so coverage-summing
+    /// silently never fired and a fully-stopped net was force-closed.)
     #[serde(default)]
     pub sl_order_id: String,
-    /// Exchange order id of the resting take-profit backing `tp_price` (empty
-    /// when none is resting).
+    /// Id of the resting take-profit backing `tp_price` (empty when none is
+    /// resting). Same client-id caveat as [`Self::sl_order_id`].
     #[serde(default)]
     pub tp_order_id: String,
     pub strategy_name: String,
