@@ -48,9 +48,49 @@ pub struct BotConfig {
     /// `botApi` is accepted as a deprecated alias.
     #[serde(default, alias = "botApi", skip_serializing_if = "Option::is_none")]
     pub lab: Option<LabConfig>,
+    /// Optional link to an independent watchdog (watchdog SPEC §2, "Bot
+    /// side"). Absent = no watchdog; the bot's own stop-loss placement and
+    /// emergency-close ladder are identical either way — this toggles ONLY
+    /// whether a second pair of eyes exists, never how the bot protects
+    /// itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogLink>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
+}
+
+/// The `watchdog` block: where to report, and who this bot claims to be.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchdogLink {
+    /// Master switch, so a link can be turned off without losing its config.
+    #[serde(default = "crate::types::config::default_true")]
+    pub enable: bool,
+    /// The watchdog's pair blob (`tctl-pair-1:…`) — the same one the Lab uses,
+    /// which is what gives the bot a pinned TLS connection to it.
+    pub blob: String,
+    /// This bot's id, exactly as the watchdog's `guardsBots` names it. A
+    /// mismatch is rejected at the endpoint rather than silently ignored.
+    pub bot_id: String,
+    /// Shared secret for the heartbeat signature. Per tenant: a leak affects
+    /// one tenant, and can only ever restore leniency — never suppress a check.
+    pub secret: String,
+    /// Push cadence. The watchdog's ALIVE window is several times this, so a
+    /// dropped message costs nothing.
+    #[serde(default = "default_heartbeat_secs")]
+    pub heartbeat_interval_secs: u64,
+    /// Hard ceiling on a send. Trading must never wait on the watchdog.
+    #[serde(default = "default_send_timeout_secs")]
+    pub send_timeout_secs: u64,
+}
+
+fn default_heartbeat_secs() -> u64 {
+    5
+}
+
+fn default_send_timeout_secs() -> u64 {
+    2
 }
 
 /// Lab-facing API settings (`tradectl-bot-api`, `:9103` by default) — the
