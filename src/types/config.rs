@@ -67,14 +67,23 @@ pub struct WatchdogLink {
     /// Master switch, so a link can be turned off without losing its config.
     #[serde(default = "crate::types::config::default_true")]
     pub enable: bool,
-    /// The watchdog's pair blob (`tctl-pair-1:…`) — the same one the Lab uses,
-    /// which is what gives the bot a pinned TLS connection to it.
+    /// The watchdog's connection string (`tctl-link-1:…`), copied from the
+    /// Lab. It carries everything at once — where the watchdog is, the
+    /// certificate to pin it to, this bot's id, and its signing secret — so
+    /// setting a link up is one paste rather than six fields typed by hand.
+    ///
+    /// A bare pair blob (`tctl-pair-1:…`) is also accepted, and then `bot_id`
+    /// and `secret` below must be filled in.
     pub blob: String,
-    /// This bot's id, exactly as the watchdog's `guardsBots` names it. A
-    /// mismatch is rejected at the endpoint rather than silently ignored.
+    /// This bot's id, exactly as the watchdog's `guardsBots` names it.
+    /// Optional: a link blob already carries it. Set here it wins, which is
+    /// the escape hatch for a bot renamed on one side only.
+    #[serde(default)]
     pub bot_id: String,
     /// Shared secret for the heartbeat signature. Per tenant: a leak affects
     /// one tenant, and can only ever restore leniency — never suppress a check.
+    /// Optional: a link blob already carries it.
+    #[serde(default)]
     pub secret: String,
     /// Push cadence. The watchdog's ALIVE window is several times this, so a
     /// dropped message costs nothing.
