@@ -42,4 +42,15 @@ pub struct Order {
     pub commission: f64,
     /// Asset in which commission was charged (e.g. "BNB", "USDT", "SOL").
     pub commission_asset: Option<String>,
+    /// Which hedge-mode position this order acts on (Binance `ps`). `None` on a
+    /// one-way account, and on any venue that does not report it.
+    ///
+    /// It is what makes a *close* distinguishable from a sibling strategy's
+    /// opposite-direction *entry*: in hedge mode a Sell naming LONG can only
+    /// reduce a long, while a Sell naming SHORT opens one. The order-update
+    /// callback is filtered by symbol alone, so without this the runner cannot
+    /// safely reconcile an unknown order that flattened its position — and a
+    /// position closed by a watchdog, by hand, or by ADL stays on its books
+    /// forever (2026-08-15, BTCUSD_PERP).
+    pub position_side: Option<Side>,
 }
