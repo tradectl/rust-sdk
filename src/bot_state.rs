@@ -37,17 +37,20 @@ const RECENT_FILLS_CAP: usize = 200;
 
 /// Shared bot state, created by the runner and passed to MCP/AI plugins.
 pub struct BotState {
-    /// Position snapshots keyed by `(strategy_name, symbol)`, updated on
-    /// every fill. Keying on symbol alone would collide whenever more than
-    /// one strategy instance trades the same symbol concurrently (a grid
-    /// config routinely runs several rungs — e.g. distinct `225S`/`30S`
-    /// strategy entries — on one symbol at once): each rung's update would
-    /// silently clobber the previous one's snapshot, so `/v1/status`
-    /// undercounts open positions and `/v1/intent` is missing rows for
-    /// every rung but the last-written one. That gap once let the watchdog
-    /// classify a bot as "blind" and force-close a position that actually
-    /// had a live virtual stop-loss the bot's own state simply couldn't
-    /// surface.
+    /// Position snapshots keyed by `(StratId, symbol)`, updated on every
+    /// fill. More than one strategy instance routinely trades one symbol at
+    /// once (a grid config runs several rungs), and each rung needs its own
+    /// row: `/v1/status` counts them and `/v1/intent` declares them, so a
+    /// collision undercounts open positions and drops declarations.
+    ///
+    /// The key was `symbol` alone, then `(strategy_name, symbol)`. Both
+    /// collided, and each collision cost a position. Names are NOT unique —
+    /// several instances under one name is supported config — so the name key
+    /// merely narrowed the failure to same-named siblings, where the first to
+    /// close removed the survivor's row and with it the declaration of a
+    /// virtual stop the bot was still enforcing (prod, 2026-08-17,
+    /// BTCUSD_PERP: the watchdog closed it for "no SL"). Only the instance id
+    /// is unique; see [`crate::strat_id::StratId`].
     positions: RwLock<HashMap<(String, String), PositionSnapshot>>,
     /// Recent fills across all symbols, ring buffer.
     recent_fills: RwLock<VecDeque<FillSnapshot>>,
