@@ -8,7 +8,13 @@ fn default_true() -> bool { true }
 use super::enums::Side;
 
 /// Top-level bot configuration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+///
+/// `Default` is the empty document — every block absent, no strategies. It
+/// exists so a caller that wants exactly that (`tradectl auth` writing a fresh
+/// config file) does not spell out a field list that goes stale every time a
+/// block is added. Construction sites that make real decisions should stay
+/// exhaustive literals, so a new block has to be considered there.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
     /// Display label only. The bot's identity — settings persistence,
