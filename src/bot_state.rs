@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::RwLock;
 use serde::Serialize;
 
+use crate::strat_id::StratId;
 use crate::types::config::{PromotionCandidate, PromotionRecord};
 
 // ── Shared trait APIs (used by both MCP and AI plugins) ────────
@@ -36,17 +37,20 @@ const RECENT_FILLS_CAP: usize = 200;
 
 /// Shared bot state, created by the runner and passed to MCP/AI plugins.
 pub struct BotState {
-    /// Position snapshots keyed by `(strategy_name, symbol)`, updated on
-    /// every fill. Keying on symbol alone would collide whenever more than
-    /// one strategy instance trades the same symbol concurrently (a grid
-    /// config routinely runs several rungs — e.g. distinct `225S`/`30S`
-    /// strategy entries — on one symbol at once): each rung's update would
-    /// silently clobber the previous one's snapshot, so `/v1/status`
-    /// undercounts open positions and `/v1/intent` is missing rows for
-    /// every rung but the last-written one. That gap once let the watchdog
-    /// classify a bot as "blind" and force-close a position that actually
-    /// had a live virtual stop-loss the bot's own state simply couldn't
-    /// surface.
+    /// Position snapshots keyed by `(StratId, symbol)`, updated on every
+    /// fill. More than one strategy instance routinely trades one symbol at
+    /// once (a grid config runs several rungs), and each rung needs its own
+    /// row: `/v1/status` counts them and `/v1/intent` declares them, so a
+    /// collision undercounts open positions and drops declarations.
+    ///
+    /// The key was `symbol` alone, then `(strategy_name, symbol)`. Both
+    /// collided, and each collision cost a position. Names are NOT unique —
+    /// several instances under one name is supported config — so the name key
+    /// merely narrowed the failure to same-named siblings, where the first to
+    /// close removed the survivor's row and with it the declaration of a
+    /// virtual stop the bot was still enforcing (prod, 2026-08-17,
+    /// BTCUSD_PERP: the watchdog closed it for "no SL"). Only the instance id
+    /// is unique; see [`crate::strat_id::StratId`].
     positions: RwLock<HashMap<(String, String), PositionSnapshot>>,
     /// Recent fills across all symbols, ring buffer.
     recent_fills: RwLock<VecDeque<FillSnapshot>>,
@@ -62,10 +66,17 @@ pub struct BotState {
     strategy_states: RwLock<HashMap<String, serde_json::Value>>,
     /// Strategy documentation (loaded from STRATEGY.md files).
     strategy_docs: RwLock<HashMap<String, String>>,
-    /// Names of emulator (paper) strategies, set once at startup. Used to
-    /// stamp `PositionSnapshot::emulated` on write so the watchdog-facing API
-    /// can exclude paper positions. A plain `std::sync::RwLock` (not tokio's):
-    /// it's read briefly inside `update_position` without crossing an `.await`.
+    /// Ids of emulator (paper) strategy instances, set once at startup. Used
+    /// to stamp `PositionSnapshot::emulated` on write so the watchdog-facing
+    /// API can exclude paper positions. A plain `std::sync::RwLock` (not
+    /// tokio's): it's read briefly inside `update_position` without crossing
+    /// an `.await`.
+    ///
+    /// Ids, not names: `is_emulator` is a property of a config ENTRY, and two
+    /// entries can share a name. Keyed by name, one paper instance would stamp
+    /// its live same-named sibling's positions `emulated` — and the watchdog
+    /// link drops those from the declaration entirely, leaving a real position
+    /// undeclared.
     emulators: std::sync::RwLock<HashSet<String>>,
 }
 
@@ -323,32 +334,40 @@ impl BotState {
         }
     }
 
-    /// Record which strategy names are emulators (paper). Called once at
+    /// Record which strategy instances are emulators (paper). Called once at
     /// startup, before any position write, so every `PositionSnapshot` is
     /// stamped with the correct `emulated` flag as it's written.
-    pub fn set_emulators(&self, names: HashSet<String>) {
-        *self.emulators.write().unwrap() = names;
+    pub fn set_emulators(&self, ids: HashSet<StratId>) {
+        *self.emulators.write().unwrap() =
+            ids.into_iter().map(|id| id.as_str().to_string()).collect();
     }
 
     // ── Write methods (called by runner) ───────────────────────
 
     /// Update position for one strategy instance's symbol. Pass `None` to
-    /// remove (position closed). `strategy_name` disambiguates concurrent
-    /// rungs on the same symbol — see the `positions` field doc.
+    /// remove (position closed).
+    ///
+    /// Keyed by [`StratId`], never by name. Two instances of one strategy on
+    /// one symbol are a supported config, and under a name key they collided
+    /// on a single entry: the second overwrote the first, and the first to go
+    /// flat **removed the survivor's snapshot**. On a `virtualSl` bot that
+    /// snapshot is the only evidence the stop exists — it is not on the
+    /// exchange — so the watchdog read a live position as unprotected and
+    /// closed it (prod, 2026-08-17, BTCUSD_PERP).
     pub async fn update_position(
         &self,
-        strategy_name: &str,
+        strategy_id: &StratId,
         symbol: &str,
         snapshot: Option<PositionSnapshot>,
     ) {
         let mut positions = self.positions.write().await;
-        let key = (strategy_name.to_string(), symbol.to_string());
+        let key = (strategy_id.as_str().to_string(), symbol.to_string());
         match snapshot {
             Some(mut s) => {
-                // Authoritative stamp from the emulator-name set — a rung is
-                // paper iff its strategy was configured as an emulator, no
+                // Authoritative stamp from the emulator-id set — a rung is
+                // paper iff its config entry was configured as an emulator, no
                 // matter what the caller passed.
-                s.emulated = self.emulators.read().unwrap().contains(strategy_name);
+                s.emulated = self.emulators.read().unwrap().contains(strategy_id.as_str());
                 positions.insert(key, s);
             }
             None => { positions.remove(&key); }
@@ -720,6 +739,12 @@ mod position_tests {
         }
     }
 
+    /// A `StratId` for a test. Production code cannot do this — the whole
+    /// point of the newtype — but a test needs to name instances somehow.
+    fn sid(id: &str) -> StratId {
+        StratId::from_validated(id)
+    }
+
     /// The regression this module exists to prevent: two strategy
     /// instances ("rungs") trading the same symbol at once must not
     /// clobber each other's position snapshot. Before this fix, keying on
@@ -730,8 +755,8 @@ mod position_tests {
     #[tokio::test]
     async fn concurrent_rungs_on_one_symbol_do_not_clobber_each_other() {
         let state = BotState::new();
-        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
-        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+        state.update_position(&sid("225S"), "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position(&sid("30S"), "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
 
         let all = state.try_get_positions();
         assert_eq!(all.len(), 2, "both rungs must survive, not just the last-written one");
@@ -744,14 +769,64 @@ mod position_tests {
     #[tokio::test]
     async fn removing_one_rung_leaves_the_others_on_the_same_symbol() {
         let state = BotState::new();
-        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
-        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+        state.update_position(&sid("225S"), "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position(&sid("30S"), "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
 
-        state.update_position("225S", "XANUSDT", None).await;
+        state.update_position(&sid("225S"), "XANUSDT", None).await;
 
         let all = state.try_get_positions();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].strategy_name, "30S");
+    }
+
+    /// Two instances of ONE strategy on one symbol — same `name`, different
+    /// ids. This is the case the previous `(name, symbol)` key could not
+    /// represent, and the case every test above misses by using distinct
+    /// names.
+    ///
+    /// Prod, 2026-08-17, BTCUSD_PERP: two same-named instances shared a leg.
+    /// The first to close called `update_position(name, sym, None)` and took
+    /// the survivor's snapshot with it. The bot was still enforcing a virtual
+    /// stop for that position, but a virtual stop rests nowhere on the
+    /// exchange — the snapshot IS the declaration — so the watchdog saw a live
+    /// position with no stop and closed it after `sl_grace_alive`.
+    #[tokio::test]
+    async fn same_named_instances_on_one_symbol_are_separate_positions() {
+        let state = BotState::new();
+        let mut a = snap("shot-emu", "BTCUSD_PERP", 63_500.0, 62_000.0);
+        a.virtual_sl = true;
+        let mut b = snap("shot-emu", "BTCUSD_PERP", 63_500.0, 61_000.0);
+        b.virtual_sl = true;
+        state.update_position(&sid("st_aaaa"), "BTCUSD_PERP", Some(a)).await;
+        state.update_position(&sid("st_bbbb"), "BTCUSD_PERP", Some(b)).await;
+        assert_eq!(state.try_get_positions().len(), 2, "a shared name is not a shared position");
+
+        // One instance goes flat. The other still holds, and still declares.
+        state.update_position(&sid("st_aaaa"), "BTCUSD_PERP", None).await;
+
+        let left = state.try_get_positions();
+        assert_eq!(left.len(), 1, "closing one same-named instance must not erase its sibling");
+        assert!(left[0].virtual_sl, "the survivor's virtual stop must still be declared");
+        assert_eq!(left[0].sl_price, 61_000.0, "and at ITS level, not the closed one's");
+    }
+
+    /// `is_emulator` is a property of a config ENTRY, so a paper instance must
+    /// not stamp a live same-named sibling's positions `emulated` — the
+    /// watchdog link drops emulated rows from the declaration entirely, which
+    /// would leave a real position undeclared.
+    #[tokio::test]
+    async fn an_emulator_does_not_stamp_its_same_named_live_sibling() {
+        let state = BotState::new();
+        state.set_emulators(HashSet::from([sid("st_paper")]));
+
+        state.update_position(&sid("st_paper"), "BTCUSD_PERP",
+            Some(snap("shot-emu", "BTCUSD_PERP", 1.0, 0.5))).await;
+        state.update_position(&sid("st_live"), "BTCUSD_PERP",
+            Some(snap("shot-emu", "BTCUSD_PERP", 1.0, 0.5))).await;
+
+        let all = state.try_get_positions();
+        assert_eq!(all.iter().filter(|p| p.emulated).count(), 1, "only the paper entry is paper");
+        assert_eq!(all.iter().filter(|p| !p.emulated).count(), 1, "the live one stays declarable");
     }
 
     /// `get_positions(Some(symbol))` must return every rung open on that
@@ -760,9 +835,9 @@ mod position_tests {
     #[tokio::test]
     async fn get_positions_by_symbol_returns_every_rung() {
         let state = BotState::new();
-        state.update_position("225S", "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
-        state.update_position("30S", "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
-        state.update_position("08S", "ETHUSDT", Some(snap("08S", "ETHUSDT", 1.0, 0.0))).await;
+        state.update_position(&sid("225S"), "XANUSDT", Some(snap("225S", "XANUSDT", 715.0, 0.0))).await;
+        state.update_position(&sid("30S"), "XANUSDT", Some(snap("30S", "XANUSDT", 990.0, 0.01138))).await;
+        state.update_position(&sid("08S"), "ETHUSDT", Some(snap("08S", "ETHUSDT", 1.0, 0.0))).await;
 
         let xan = state.get_positions(Some("XANUSDT")).await;
         assert_eq!(xan.len(), 2);
@@ -781,8 +856,8 @@ mod position_tests {
         a.unrealized_pnl = -1.5;
         let mut b = snap("30S", "XANUSDT", 990.0, 0.01138);
         b.unrealized_pnl = 2.0;
-        state.update_position("225S", "XANUSDT", Some(a)).await;
-        state.update_position("30S", "XANUSDT", Some(b)).await;
+        state.update_position(&sid("225S"), "XANUSDT", Some(a)).await;
+        state.update_position(&sid("30S"), "XANUSDT", Some(b)).await;
 
         let comparisons = state.get_symbol_comparison().await;
         let xan = comparisons.iter().find(|c| c.symbol == "XANUSDT").expect("XANUSDT missing");

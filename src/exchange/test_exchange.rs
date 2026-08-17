@@ -366,6 +366,7 @@ impl MarketAdapter for TestExchange {
             closed_at: None,
             commission: 0.0,
             commission_asset: None,
+            position_side: None,
         };
 
         if is_market {

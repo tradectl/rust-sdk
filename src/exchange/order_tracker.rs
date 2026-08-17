@@ -311,6 +311,7 @@ mod tests {
             closed_at: None,
             commission: 0.0,
             commission_asset: None,
+            position_side: None,
         }
     }
 
