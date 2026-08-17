@@ -347,6 +347,11 @@ mod tests {
     /// above the average and the cold filter passes everything; against NaN
     /// every comparison is false and it trades nothing.
     #[test]
+    // The negated comparisons are the point: a strategy that skips the ready
+    // check writes `price > ma`, and this pins that EVERY ordering against a
+    // cold (NaN) value is false. `partial_cmp` would express the same fact in
+    // a form no strategy actually writes.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     fn a_cold_value_read_raw_refuses_rather_than_admits() {
         let cold = IndicatorValue::COLD.value;
         for price in [0.01, 1.0, 50_000.0] {

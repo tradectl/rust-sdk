@@ -144,7 +144,6 @@ fn gzip_file(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
 
     fn touch(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let p = dir.join(name);
