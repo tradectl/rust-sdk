@@ -505,8 +505,7 @@ mod tests {
     #[test]
     fn entry_cid_for_slot_finds_by_symbol_and_slot() {
         let mut tracker = OrderTracker::new();
-        let mut meta = EntryMetadata::default();
-        meta.slot = Some("_".into());
+        let meta = EntryMetadata { slot: Some("_".into()), ..Default::default() };
         tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), meta);
 
         assert_eq!(tracker.entry_cid_for_slot("BTCUSDT", "_").as_deref(), Some("CA"));

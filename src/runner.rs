@@ -305,6 +305,185 @@ pub fn init_logging() {
     setup_logging("tradectl", &None);
 }
 
+
+// ── Order ID ────────────────────────────────────────────────────────
+
+/// Generate order ID matching production format: `p{timestamp_ms}{seq:04}`.
+pub fn gen_order_id(timestamp_ms: u64, seq: &mut u64) -> String {
+    *seq += 1;
+    format!("p{}{:04}", timestamp_ms, *seq)
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global WS event timestamp (ms). Updated by the runner on every event.
+/// `log_order` reads this so order log lines carry the WS-event time
+/// (deterministic in replay; falls back to wall-clock only before any
+/// event has arrived in live).
+static DATA_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Set the current data timestamp (called by the runner on every event).
+pub fn set_data_timestamp(ms: u64) {
+    DATA_TIMESTAMP_MS.store(ms, Ordering::Relaxed);
+}
+
+/// Format the global WS-event timestamp as RFC3339 with millisecond
+/// precision (e.g. `2025-01-12T10:30:45.123Z`) — matches the resolution
+/// of the source data, no fake-zero padding.
+pub fn format_data_ts() -> String {
+    let ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
+    if ms == 0 { return String::new(); }
+    let secs = (ms / 1000) as i64;
+    let nanos = ((ms % 1000) * 1_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, nanos)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| format!("{}ms", ms))
+}
+
+// ── Price formatting ────────────────────────────────────────────────
+
+/// Truncate (not round) a float to 5 decimal places for display.
+/// Trailing zeros stripped but keeps at least 2 decimals:
+/// `108880.38000` → `108880.38`, `94151.50000` → `94151.50`.
+pub fn trunc5(v: f64) -> String {
+    let units = (v.abs() * 100_000.0).trunc() as u64;
+    let whole = units / 100_000;
+    let frac = units % 100_000;
+    let raw = if v < 0.0 && units > 0 {
+        format!("-{}.{:05}", whole, frac)
+    } else {
+        format!("{}.{:05}", whole, frac)
+    };
+    // Keep at least 2 decimal places (trim only positions 3-5)
+    let (head, tail) = raw.split_at(raw.len() - 3);
+    format!("{}{}", head, tail.trim_end_matches('0'))
+}
+
+// ── Shared log functions ────────────────────────────────────────────
+//
+// Both the LoggingAdapter and paper runner call these so that the
+// format is defined once.
+
+/// Core order log: `[cid][name/symbol] message`. The leading timestamp
+/// is added by the global formatter (WS-event time in replay, wall-clock
+/// otherwise) — emitting one here would double-stamp the line.
+pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
+    log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
+}
+
+/// Telegram-mirror log: `[TG] message`. Strips Telegram-Markdown `\_`
+/// escapes from the body — the on-wire Telegram message keeps them; only
+/// the human-facing log shows the unescaped form.
+pub fn log_tg(msg: impl AsRef<str>) {
+    let display = msg.as_ref().replace("\\_", "_");
+    log::info!("[TG] {}", display);
+}
+
+/// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
+///
+/// Eight arguments because the line has eight fields. Grouping them into a
+/// struct would move the argument list to the call site without shortening it,
+/// and this is a public helper the engine calls from ~40 places.
+#[allow(clippy::too_many_arguments)]
+pub fn log_placed(
+    cid: &str, name: &str, symbol: &str,
+    side: &str, order_type: &str,
+    qty: impl std::fmt::Display, price_str: &str,
+    elapsed_ms: u128,
+) {
+    log_order(cid, name, symbol, format_args!(
+        "[{}ms] placed {} {} {}{}", elapsed_ms, side, order_type, qty, price_str
+    ));
+}
+
+/// `[cid][name/symbol] filled: SIDE qty @ price`
+pub fn log_filled(
+    cid: &str, name: &str, symbol: &str,
+    side: &str, qty: impl std::fmt::Display, price: f64,
+) {
+    log_order(cid, name, symbol, format_args!(
+        "filled: {} {} @ {}", side, qty, trunc5(price)
+    ));
+}
+
+/// `[cid][name/symbol][Xms] edited: price -> X, qty Y`
+///
+/// Emitted at **debug** (not info) on purpose: edit confirmations fire on every
+/// re-quote and flooded the Lab logs strip. bot-api captures INFO+ only, so
+/// this drops out of the live feed while staying in the debug file log. It does
+/// NOT route through `log_order` (which is info) for that reason.
+pub fn log_edited(
+    cid: &str, name: &str, symbol: &str,
+    price: f64, qty_str: &str,
+    elapsed_ms: u128,
+) {
+    log::debug!(
+        "[{}][{}/{}] [{}ms] edited: price -> {}{}",
+        cid, name, symbol, elapsed_ms, trunc5(price), qty_str
+    );
+}
+
+/// `[cid][name/symbol][Xms] canceled`
+pub fn log_canceled(cid: &str, name: &str, symbol: &str, elapsed_ms: u128) {
+    log_order(cid, name, symbol, format_args!("[{}ms] canceled", elapsed_ms));
+}
+
+/// `[cid][name/symbol] processing KIND order update: status=STATUS`
+pub fn log_processing(
+    cid: &str, name: &str, symbol: &str,
+    kind: &str, status: &str,
+) {
+    log_order(cid, name, symbol, format_args!(
+        "processing {} order update: status={}", kind, status
+    ));
+}
+
+/// `[cid][name/symbol] SL scheduled in Xs`
+pub fn log_sl_scheduled(cid: &str, name: &str, symbol: &str, delay_secs: u64) {
+    log_order(cid, name, symbol, format_args!("SL scheduled in {}s", delay_secs));
+}
+
+/// `[cid][name/symbol] SL placed @ price`
+pub fn log_sl_placed(cid: &str, name: &str, symbol: &str, price: f64) {
+    log_order(cid, name, symbol, format_args!("SL placed @ {}", trunc5(price)));
+}
+
+/// `[name] starting (mode, pairs: ...)`
+pub fn log_startup(name: &str, mode: &str, pairs: &[String]) {
+    log::info!("[{}] starting ({}, pairs: {})", name, mode, pairs.join(", "));
+}
+
+/// `PROVIDER ws connected, balance: X, pairs: ...`
+pub fn log_connected(provider: &str, balance: f64, pairs: &str) {
+    log::info!("{} ws connected, balance: {:.2}, pairs: {}", provider, balance, pairs);
+}
+
+/// `monitor WS listening on HOST:PORT`
+pub fn log_monitor(host: &str, port: u16) {
+    log::info!("monitor WS listening on {}:{}", host, port);
+}
+
+// ── Position tracking ───────────────────────────────────────────────
+
+/// Build a single PositionInfo from accumulated position state.
+pub fn build_position_info(
+    side: Side,
+    avg_entry: f64,
+    quantity: f64,
+    total_entered: f64,
+    entry_count: usize,
+    last_entry_price: f64,
+) -> PositionInfo {
+    PositionInfo {
+        side,
+        avg_entry,
+        quantity,
+        total_entered,
+        entry_count,
+        last_entry_price,
+    }
+}
+
 #[cfg(test)]
 mod logging_tests {
     use super::*;
@@ -406,178 +585,5 @@ mod logging_tests {
     fn sanitize_falls_back_to_bot_for_empty() {
         assert_eq!(sanitize_bot_name(""), "bot");
         assert_eq!(sanitize_bot_name("   "), "bot");
-    }
-}
-
-// ── Order ID ────────────────────────────────────────────────────────
-
-/// Generate order ID matching production format: `p{timestamp_ms}{seq:04}`.
-pub fn gen_order_id(timestamp_ms: u64, seq: &mut u64) -> String {
-    *seq += 1;
-    format!("p{}{:04}", timestamp_ms, *seq)
-}
-
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Global WS event timestamp (ms). Updated by the runner on every event.
-/// `log_order` reads this so order log lines carry the WS-event time
-/// (deterministic in replay; falls back to wall-clock only before any
-/// event has arrived in live).
-static DATA_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Set the current data timestamp (called by the runner on every event).
-pub fn set_data_timestamp(ms: u64) {
-    DATA_TIMESTAMP_MS.store(ms, Ordering::Relaxed);
-}
-
-/// Format the global WS-event timestamp as RFC3339 with millisecond
-/// precision (e.g. `2025-01-12T10:30:45.123Z`) — matches the resolution
-/// of the source data, no fake-zero padding.
-pub fn format_data_ts() -> String {
-    let ms = DATA_TIMESTAMP_MS.load(Ordering::Relaxed);
-    if ms == 0 { return String::new(); }
-    let secs = (ms / 1000) as i64;
-    let nanos = ((ms % 1000) * 1_000_000) as u32;
-    chrono::DateTime::from_timestamp(secs, nanos)
-        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_else(|| format!("{}ms", ms))
-}
-
-// ── Price formatting ────────────────────────────────────────────────
-
-/// Truncate (not round) a float to 5 decimal places for display.
-/// Trailing zeros stripped but keeps at least 2 decimals:
-/// `108880.38000` → `108880.38`, `94151.50000` → `94151.50`.
-pub fn trunc5(v: f64) -> String {
-    let units = (v.abs() * 100_000.0).trunc() as u64;
-    let whole = units / 100_000;
-    let frac = units % 100_000;
-    let raw = if v < 0.0 && units > 0 {
-        format!("-{}.{:05}", whole, frac)
-    } else {
-        format!("{}.{:05}", whole, frac)
-    };
-    // Keep at least 2 decimal places (trim only positions 3-5)
-    let (head, tail) = raw.split_at(raw.len() - 3);
-    format!("{}{}", head, tail.trim_end_matches('0'))
-}
-
-// ── Shared log functions ────────────────────────────────────────────
-//
-// Both the LoggingAdapter and paper runner call these so that the
-// format is defined once.
-
-/// Core order log: `[cid][name/symbol] message`. The leading timestamp
-/// is added by the global formatter (WS-event time in replay, wall-clock
-/// otherwise) — emitting one here would double-stamp the line.
-pub fn log_order(cid: &str, name: &str, symbol: &str, msg: impl std::fmt::Display) {
-    log::info!("[{}][{}/{}] {}", cid, name, symbol, msg);
-}
-
-/// Telegram-mirror log: `[TG] message`. Strips Telegram-Markdown `\_`
-/// escapes from the body — the on-wire Telegram message keeps them; only
-/// the human-facing log shows the unescaped form.
-pub fn log_tg(msg: impl AsRef<str>) {
-    let display = msg.as_ref().replace("\\_", "_");
-    log::info!("[TG] {}", display);
-}
-
-/// `[cid][name/symbol][Xms] placed SIDE TYPE qty …`
-pub fn log_placed(
-    cid: &str, name: &str, symbol: &str,
-    side: &str, order_type: &str,
-    qty: impl std::fmt::Display, price_str: &str,
-    elapsed_ms: u128,
-) {
-    log_order(cid, name, symbol, format_args!(
-        "[{}ms] placed {} {} {}{}", elapsed_ms, side, order_type, qty, price_str
-    ));
-}
-
-/// `[cid][name/symbol] filled: SIDE qty @ price`
-pub fn log_filled(
-    cid: &str, name: &str, symbol: &str,
-    side: &str, qty: impl std::fmt::Display, price: f64,
-) {
-    log_order(cid, name, symbol, format_args!(
-        "filled: {} {} @ {}", side, qty, trunc5(price)
-    ));
-}
-
-/// `[cid][name/symbol][Xms] edited: price -> X, qty Y`
-///
-/// Emitted at **debug** (not info) on purpose: edit confirmations fire on every
-/// re-quote and flooded the Lab logs strip. bot-api captures INFO+ only, so
-/// this drops out of the live feed while staying in the debug file log. It does
-/// NOT route through `log_order` (which is info) for that reason.
-pub fn log_edited(
-    cid: &str, name: &str, symbol: &str,
-    price: f64, qty_str: &str,
-    elapsed_ms: u128,
-) {
-    log::debug!(
-        "[{}][{}/{}] [{}ms] edited: price -> {}{}",
-        cid, name, symbol, elapsed_ms, trunc5(price), qty_str
-    );
-}
-
-/// `[cid][name/symbol][Xms] canceled`
-pub fn log_canceled(cid: &str, name: &str, symbol: &str, elapsed_ms: u128) {
-    log_order(cid, name, symbol, format_args!("[{}ms] canceled", elapsed_ms));
-}
-
-/// `[cid][name/symbol] processing KIND order update: status=STATUS`
-pub fn log_processing(
-    cid: &str, name: &str, symbol: &str,
-    kind: &str, status: &str,
-) {
-    log_order(cid, name, symbol, format_args!(
-        "processing {} order update: status={}", kind, status
-    ));
-}
-
-/// `[cid][name/symbol] SL scheduled in Xs`
-pub fn log_sl_scheduled(cid: &str, name: &str, symbol: &str, delay_secs: u64) {
-    log_order(cid, name, symbol, format_args!("SL scheduled in {}s", delay_secs));
-}
-
-/// `[cid][name/symbol] SL placed @ price`
-pub fn log_sl_placed(cid: &str, name: &str, symbol: &str, price: f64) {
-    log_order(cid, name, symbol, format_args!("SL placed @ {}", trunc5(price)));
-}
-
-/// `[name] starting (mode, pairs: ...)`
-pub fn log_startup(name: &str, mode: &str, pairs: &[String]) {
-    log::info!("[{}] starting ({}, pairs: {})", name, mode, pairs.join(", "));
-}
-
-/// `PROVIDER ws connected, balance: X, pairs: ...`
-pub fn log_connected(provider: &str, balance: f64, pairs: &str) {
-    log::info!("{} ws connected, balance: {:.2}, pairs: {}", provider, balance, pairs);
-}
-
-/// `monitor WS listening on HOST:PORT`
-pub fn log_monitor(host: &str, port: u16) {
-    log::info!("monitor WS listening on {}:{}", host, port);
-}
-
-// ── Position tracking ───────────────────────────────────────────────
-
-/// Build a single PositionInfo from accumulated position state.
-pub fn build_position_info(
-    side: Side,
-    avg_entry: f64,
-    quantity: f64,
-    total_entered: f64,
-    entry_count: usize,
-    last_entry_price: f64,
-) -> PositionInfo {
-    PositionInfo {
-        side,
-        avg_entry,
-        quantity,
-        total_entered,
-        entry_count,
-        last_entry_price,
     }
 }

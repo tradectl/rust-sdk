@@ -319,6 +319,12 @@ pub struct SymbolComparison {
 
 // ── BotState implementation ────────────────────────────────────
 
+impl Default for BotState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BotState {
     pub fn new() -> Self {
         Self {
