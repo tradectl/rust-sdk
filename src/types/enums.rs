@@ -52,8 +52,9 @@ pub enum TimeInForce {
     Gtx,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
 pub enum Side {
+    #[default]
     Long,
     Short,
 }
@@ -75,12 +76,6 @@ impl std::fmt::Display for Side {
             Side::Long => write!(f, "LONG"),
             Side::Short => write!(f, "SHORT"),
         }
-    }
-}
-
-impl Default for Side {
-    fn default() -> Self {
-        Side::Long
     }
 }
 

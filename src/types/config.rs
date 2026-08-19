@@ -8,7 +8,13 @@ fn default_true() -> bool { true }
 use super::enums::Side;
 
 /// Top-level bot configuration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+///
+/// `Default` is the empty document — every block absent, no strategies. It
+/// exists so a caller that wants exactly that (`tradectl auth` writing a fresh
+/// config file) does not spell out a field list that goes stale every time a
+/// block is added. Construction sites that make real decisions should stay
+/// exhaustive literals, so a new block has to be considered there.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotConfig {
     /// Display label only. The bot's identity — settings persistence,
@@ -48,9 +54,58 @@ pub struct BotConfig {
     /// `botApi` is accepted as a deprecated alias.
     #[serde(default, alias = "botApi", skip_serializing_if = "Option::is_none")]
     pub lab: Option<LabConfig>,
+    /// Optional link to an independent watchdog (watchdog SPEC §2, "Bot
+    /// side"). Absent = no watchdog; the bot's own stop-loss placement and
+    /// emergency-close ladder are identical either way — this toggles ONLY
+    /// whether a second pair of eyes exists, never how the bot protects
+    /// itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogLink>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
+}
+
+/// The `watchdog` block: where to report, and who this bot claims to be.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchdogLink {
+    /// Master switch, so a link can be turned off without losing its config.
+    #[serde(default = "crate::types::config::default_true")]
+    pub enable: bool,
+    /// The watchdog's connection string (`tctl-link-1:…`), copied from the
+    /// Lab. It carries everything at once — where the watchdog is, the
+    /// certificate to pin it to, this bot's id, and its signing secret — so
+    /// setting a link up is one paste rather than six fields typed by hand.
+    ///
+    /// A bare pair blob (`tctl-pair-1:…`) is also accepted, and then `bot_id`
+    /// and `secret` below must be filled in.
+    pub blob: String,
+    /// This bot's id, exactly as the watchdog's `guardsBots` names it.
+    /// Optional: a link blob already carries it. Set here it wins, which is
+    /// the escape hatch for a bot renamed on one side only.
+    #[serde(default)]
+    pub bot_id: String,
+    /// Shared secret for the heartbeat signature. Per tenant: a leak affects
+    /// one tenant, and can only ever restore leniency — never suppress a check.
+    /// Optional: a link blob already carries it.
+    #[serde(default)]
+    pub secret: String,
+    /// Push cadence. The watchdog's ALIVE window is several times this, so a
+    /// dropped message costs nothing.
+    #[serde(default = "default_heartbeat_secs")]
+    pub heartbeat_interval_secs: u64,
+    /// Hard ceiling on a send. Trading must never wait on the watchdog.
+    #[serde(default = "default_send_timeout_secs")]
+    pub send_timeout_secs: u64,
+}
+
+fn default_heartbeat_secs() -> u64 {
+    5
+}
+
+fn default_send_timeout_secs() -> u64 {
+    2
 }
 
 /// Lab-facing API settings (`tradectl-bot-api`, `:9103` by default) — the

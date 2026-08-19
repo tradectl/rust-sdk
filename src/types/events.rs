@@ -98,6 +98,14 @@ impl Default for DepthEvent {
 ///
 /// Not serialized. On-disk segments store the underlying `#[repr(C)]` structs
 /// contiguously; the enum tag is synthesized during iteration.
+///
+/// `Depth` dominates the size (two `[DepthLevel; 20]` arrays), so every
+/// `Ticker` yielded carries that footprint. Boxing it is the lint's suggestion
+/// and the wrong trade here twice over: it costs `Copy`, which every consumer
+/// of the merge iterator relies on, and it puts an allocation on the per-event
+/// path of the backtest's hottest loop — to save memory traffic on a value
+/// that lives for one iteration and never escapes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy)]
 pub enum MarketEvent {
     Ticker(TickerEvent),

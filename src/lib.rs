@@ -4,6 +4,7 @@ pub mod exchange;
 pub mod runner;
 pub mod logging;
 pub mod bot_state;
+pub mod strat_id;
 pub mod reader;
 #[cfg(feature = "monitor")]
 pub mod monitor;
@@ -12,6 +13,7 @@ mod run_cli;
 
 // Re-export top-level for convenience
 pub use types::*;
+pub use strat_id::{StratId, StratIdent};
 pub use strategy::*;
 pub use reader::{
     CloseReason, CoinStat, DailyStat, PositionReader, StatsReader, StatsResponse, StatsSummary,
