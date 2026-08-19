@@ -1,6 +1,11 @@
 use crate::types::enums::MarketType;
 
-#[derive(Debug, Clone)]
+/// `PartialEq` so a metadata refresh can ask "did anything about this symbol
+/// change?" in one comparison. Field-by-field checks at the call site go stale
+/// the moment a field is added here — a `contract_size` change was invisible to
+/// one such check, which is six orders of magnitude of notional on an inverse
+/// pair.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PairInfo {
     pub symbol: String,
     pub display_name: String,
