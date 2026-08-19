@@ -79,6 +79,24 @@ pub trait MarketAdapter: Send + Sync {
     fn get_pairs(&self) -> HashMap<String, PairInfo>;
     fn get_pair_info(&self, symbol: &str) -> Option<PairInfo>;
     async fn load_pair(&self, symbol: &str) -> ExchangeResult<PairInfo>;
+
+    /// Re-read every symbol's metadata from the venue, replacing the cache.
+    ///
+    /// [`load_pair`](Self::load_pair) answers from cache and reaches the venue
+    /// only on a MISS, so a venue that changes a live symbol's `tickSize` or
+    /// `stepSize` is never observed again for the life of the process. Every
+    /// price the runner sends is snapped to the cached `price_step`, so a stale
+    /// step puts every order off the venue's grid: Binance answers `-4014`,
+    /// which classifies as `InvalidRequest`/`Bug`, and the 3-in-60s breaker
+    /// then stops the strategy for what is really a stale cache (2026-08-15,
+    /// ONUSDT, two strategies).
+    ///
+    /// Adapters that hold no cache return `Ok(())` — but they must say so
+    /// explicitly, for the reason spelled out on
+    /// [`resync_clock`](Self::resync_clock): a default body here is exactly
+    /// what lets a delegating wrapper drop the forward without a compile error.
+    async fn refresh_pairs(&self) -> ExchangeResult<()>;
+
     async fn subscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()>;
     /// Drop the market-data streams for `symbols` — the inverse of
     /// [`subscribe_pairs`](Self::subscribe_pairs).
