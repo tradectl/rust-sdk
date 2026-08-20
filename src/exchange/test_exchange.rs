@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use async_trait::async_trait;
 use crate::types::{
-    BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest, OrderSide,
+    BookTicker, FundingEntry, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest, OrderSide,
     OrderStatus, OrderType, PairInfo, ProfitResult, Ticker24hr, TradeData,
     calculate_inverse_profit, calculate_linear_profit, calculate_spot_profit,
     InverseProfitParams, LinearProfitParams, SpotProfitParams,
@@ -205,6 +205,9 @@ impl TestExchange {
 
 #[async_trait]
 impl MarketAdapter for TestExchange {
+    /// No funding-history endpoint here — reported explicitly, never by
+    /// falling through to a trait default.
+    async fn fetch_funding(&self, _start_ms: i64, _end_ms: i64) -> ExchangeResult<Vec<FundingEntry>> { Ok(Vec::new()) }
     fn resolved_hedge_mode(&self) -> bool { false }
     fn market_type(&self) -> MarketType {
         self.market_type_val

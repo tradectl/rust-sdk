@@ -42,6 +42,31 @@ pub struct Ticker24hr {
     pub quote_volume: f64,
 }
 
+/// One account income event — a funding payment above all.
+///
+/// The bot's realized P&L is built from order fills, and funding is not a
+/// fill: it is charged against the *netted* position of a symbol, on the
+/// venue's own schedule, with no order behind it. Nothing in the fill stream
+/// reports it, which is why it needs its own path from the venue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FundingEntry {
+    /// Symbol the venue attributed the payment to. May be empty for
+    /// account-wide income.
+    pub symbol: String,
+    /// Signed, in `asset`. Negative = the account paid.
+    pub amount: f64,
+    /// Settlement currency — USDT on a linear account, the base coin on an
+    /// inverse one. Carried rather than assumed: summing a coin-denominated
+    /// amount into a USD total invents a number.
+    pub asset: String,
+    /// The venue's own transaction id. The dedup key that lets a poller
+    /// re-read an overlapping window safely, so it must be stable and unique
+    /// per account — never synthesized from the row's contents.
+    pub txn_id: String,
+    /// When the venue booked it, epoch millis.
+    pub time_ms: i64,
+}
+
 /// A single price level in the order book (L2 depth).
 ///
 /// `#[repr(C)]` with `f64 + f64` layout so it is bit-compatible with the

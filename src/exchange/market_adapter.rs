@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use async_trait::async_trait;
 use crate::types::{
-    BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest,
-    OrderSide, PairInfo, ProfitResult, Ticker24hr, TradeData,
+    BookTicker, FundingEntry, KlineData, MarketFees, MarketType, Order, OrderBookDepth,
+    OrderRequest, OrderSide, PairInfo, ProfitResult, Ticker24hr, TradeData,
 };
 
 pub type CallbackId = u64;
@@ -96,6 +96,30 @@ pub trait MarketAdapter: Send + Sync {
     /// [`resync_clock`](Self::resync_clock): a default body here is exactly
     /// what lets a delegating wrapper drop the forward without a compile error.
     async fn refresh_pairs(&self) -> ExchangeResult<()>;
+
+    /// Funding booked to the account in `[start_ms, end_ms]`, oldest first.
+    ///
+    /// The runner's P&L is assembled from order fills, so without this it is
+    /// structurally blind to funding: a position held across a settlement is
+    /// charged with no fill to observe, and the bot's total drifts from the
+    /// account's by the accumulated amount, without bound. Reported totals read
+    /// high or low forever and nothing in the books says why (2026-08-20,
+    /// bnum: `/month` +$434 against roughly $6 on the venue).
+    ///
+    /// Callers re-read an overlapping window on purpose — a venue may book a
+    /// payment late — so [`FundingEntry::txn_id`] carries the venue's own id
+    /// and must be stable across re-reads.
+    ///
+    /// Venues with no funding-history endpoint return `Ok(Vec::new())`, and
+    /// must say so explicitly for the reason on
+    /// [`resync_clock`](Self::resync_clock): a default body is what lets a
+    /// delegating wrapper drop the forward with no compile error, and this is
+    /// a value that is simply absent when dropped rather than obviously wrong.
+    async fn fetch_funding(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> ExchangeResult<Vec<FundingEntry>>;
 
     async fn subscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()>;
     /// Drop the market-data streams for `symbols` — the inverse of
