@@ -242,6 +242,12 @@ impl MarketAdapter for TestExchange {
         Ok(pair)
     }
 
+    /// No venue to re-read: pairs are whatever the test put there, and a test
+    /// that wants a changed grid writes it directly.
+    async fn refresh_pairs(&self) -> ExchangeResult<()> {
+        Ok(())
+    }
+
     async fn subscribe_pairs(&self, symbols: &[String]) -> ExchangeResult<()> {
         for s in symbols {
             self.load_pair(s).await?;
