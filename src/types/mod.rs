@@ -4,6 +4,7 @@ mod orders;
 mod trade;
 mod params;
 mod pair_info;
+mod bracket;
 mod market_data;
 pub mod indicator;
 pub mod volume;
@@ -16,6 +17,7 @@ pub use orders::*;
 pub use trade::*;
 pub use params::*;
 pub use pair_info::*;
+pub use bracket::*;
 pub use market_data::*;
 pub use indicator::{
     IndicatorFamily, IndicatorInstanceKey, IndicatorKind, IndicatorRequest, IndicatorSource,
