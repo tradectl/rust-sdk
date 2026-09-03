@@ -408,6 +408,16 @@ pub struct ApiConfig {
     /// max leverage below the account's cached value. Default: false.
     #[serde(default)]
     pub auto_adjust_leverage: bool,
+    /// Cap on what this account may hold plus rest on one symbol and side,
+    /// across every strategy in the bot, in quote currency. The smaller of this
+    /// and the venue's bracket cap wins. `None` (omit the key): the venue's
+    /// ladder alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_symbol_notional: Option<f64>,
+    /// Shrink entries to fit the per-symbol notional cap instead of letting the
+    /// venue refuse them (-2027) and stopping the symbol. Default: true.
+    #[serde(default = "default_true")]
+    pub bracket_fit: bool,
     /// Force hedge mode (dual-side position) on the exchange. `None` (the
     /// default — omit the key) means "leave it alone": the adapter detects
     /// and uses whatever mode the account is already in, without ever
@@ -441,6 +451,8 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             auto_adjust_leverage: false,
+            max_symbol_notional: None,
+            bracket_fit: true,
             hedge_mode: None,
             env: None,
         }

@@ -218,6 +218,22 @@ impl OrderTracker {
     /// order (post-edit), which is what a chasing strategy should compare
     /// against. The `"_"` single-entry slot sentinel maps back to `None` so the
     /// strategy sees the same `entry_id` it placed with.
+    /// Notional of this tracker's resting entries on `symbol`: the unfilled
+    /// remainder of every `New` / `PartiallyFilled` entry at its price.
+    pub fn resting_entry_notional(&self, symbol: &str) -> f64 {
+        let Some(sm) = self.orders.get(symbol) else { return 0.0 };
+        self.entry_metadata.iter()
+            .filter_map(|(cid, meta)| {
+                let order = sm.get(cid)?;
+                if !matches!(order.status, OrderStatus::New | OrderStatus::PartiallyFilled) {
+                    return None;
+                }
+                let filled = order.filled_quantity.max(meta.cum_filled_qty);
+                Some((meta.entry_qty - filled).max(0.0) * meta.entry_price)
+            })
+            .sum()
+    }
+
     pub fn entry_orders_for_symbol(&self, symbol: &str) -> Vec<EntryOrder> {
         let Some(sm) = self.orders.get(symbol) else { return Vec::new() };
         self.entry_metadata.iter()

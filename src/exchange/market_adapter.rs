@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::types::{
     BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest,
     OrderSide, PairInfo, ProfitResult, Ticker24hr, TradeData,
+    BracketTier,
 };
 
 pub type CallbackId = u64;
@@ -196,6 +197,12 @@ pub trait MarketAdapter: Send + Sync {
     /// sweep) and we must confirm the real cap before clamping. Adapters
     /// without a separate cache delegate to `get_max_leverage`.
     async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32>;
+    /// The venue's notional ladder for `symbol`, from the adapter's cache — the
+    /// same data `get_max_leverage` reads its first tier from. Empty when the
+    /// venue has no such concept, the symbol is unknown, or the ladder has not
+    /// been fetched yet; callers treat empty as "no cap known" and never invent
+    /// one. Sync and allocation-light: it sits on the entry path.
+    fn bracket_ladder(&self, symbol: &str) -> Vec<BracketTier>;
     /// Auto-adjust leverage for newly-subscribed symbols. Re-fetches
     /// bracket caps and lowers any symbol whose current leverage exceeds
     /// the exchange's first-bracket max. Called by the runner right after

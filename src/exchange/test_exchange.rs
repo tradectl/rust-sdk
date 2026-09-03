@@ -7,6 +7,7 @@ use crate::types::{
     OrderStatus, OrderType, PairInfo, ProfitResult, Ticker24hr, TradeData,
     calculate_inverse_profit, calculate_linear_profit, calculate_spot_profit,
     InverseProfitParams, LinearProfitParams, SpotProfitParams,
+    BracketTier,
 };
 use crate::exchange::market_adapter::{
     BookTickerCallback, CallbackId, DepthCallback, ExchangeResult, KlineCallback, MarketAdapter,
@@ -517,6 +518,7 @@ impl MarketAdapter for TestExchange {
     async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32> {
         self.get_max_leverage(symbol).await
     }
+    fn bracket_ladder(&self, _symbol: &str) -> Vec<BracketTier> { Vec::new() }
 
     async fn try_auto_adjust_all_leverage(
         &self,
