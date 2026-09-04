@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 fn default_true() -> bool { true }
+fn is_true(v: &bool) -> bool { *v }
 use super::enums::Side;
 
 /// Top-level bot configuration.
@@ -416,7 +417,7 @@ pub struct ApiConfig {
     pub max_symbol_notional: Option<f64>,
     /// Shrink entries to fit the per-symbol notional cap instead of letting the
     /// venue refuse them (-2027) and stopping the symbol. Default: true.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub bracket_fit: bool,
     /// Force hedge mode (dual-side position) on the exchange. `None` (the
     /// default — omit the key) means "leave it alone": the adapter detects

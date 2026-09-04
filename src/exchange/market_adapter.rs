@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::types::{
     BookTicker, KlineData, MarketFees, MarketType, Order, OrderBookDepth, OrderRequest,
     OrderSide, PairInfo, ProfitResult, Ticker24hr, TradeData,
-    BracketTier,
+    Side,
 };
 
 pub type CallbackId = u64;
@@ -196,13 +196,25 @@ pub trait MarketAdapter: Send + Sync {
     /// (a fresh listing whose bracket appeared after the subscribe-time
     /// sweep) and we must confirm the real cap before clamping. Adapters
     /// without a separate cache delegate to `get_max_leverage`.
+    ///
+    /// This is also the runner's "the venue disagrees with me" hook: an
+    /// adapter that caches `position_amount` re-reads the symbol's position
+    /// here too, so one `-2027` corrects both numbers the fit measures with.
     async fn refresh_max_leverage(&self, symbol: &str) -> ExchangeResult<u32>;
-    /// The venue's notional ladder for `symbol`, from the adapter's cache — the
-    /// same data `get_max_leverage` reads its first tier from. Empty when the
-    /// venue has no such concept, the symbol is unknown, or the ladder has not
-    /// been fetched yet; callers treat empty as "no cap known" and never invent
-    /// one. Sync and allocation-light: it sits on the entry path.
-    fn bracket_ladder(&self, symbol: &str) -> Vec<BracketTier>;
+    /// The venue's max same-side notional for `symbol` at the account's
+    /// CURRENT leverage — the bracket cap a `-2027` is measured against.
+    /// `None` when the venue has no such cap (Spot, a venue without brackets),
+    /// the ladder has not been fetched, or the leverage is unknown; callers
+    /// treat `None` as "fit off" and never invent a cap. Sync cache read: it
+    /// sits on the entry path.
+    fn notional_cap(&self, symbol: &str) -> Option<f64>;
+    /// The venue's position on `symbol` as the adapter last saw it: in hedge
+    /// mode the size of the `hedge_side` leg (never negative); on a one-way
+    /// book (`None`) the signed net amount. Base units, or contracts on an
+    /// inverse market. `None` = unknown — the adapter keeps no position view,
+    /// or has not seeded one yet — and callers treat it as "fit off" rather
+    /// than as flat. Sync cache read: it sits on the entry path.
+    fn position_amount(&self, symbol: &str, hedge_side: Option<Side>) -> Option<f64>;
     /// Auto-adjust leverage for newly-subscribed symbols. Re-fetches
     /// bracket caps and lowers any symbol whose current leverage exceeds
     /// the exchange's first-bracket max. Called by the runner right after

@@ -219,8 +219,10 @@ impl OrderTracker {
     /// against. The `"_"` single-entry slot sentinel maps back to `None` so the
     /// strategy sees the same `entry_id` it placed with.
     /// Notional of this tracker's resting entries on `symbol`: the unfilled
-    /// remainder of every `New` / `PartiallyFilled` entry at its price.
-    pub fn resting_entry_notional(&self, symbol: &str) -> f64 {
+    /// remainder of every `New` / `PartiallyFilled` entry, priced by
+    /// `notional_of(qty, price)` — the caller's, because an inverse quantity
+    /// is contracts of fixed USD value and `qty × price` is wrong there.
+    pub fn resting_entry_notional(&self, symbol: &str, notional_of: &dyn Fn(f64, f64) -> f64) -> f64 {
         let Some(sm) = self.orders.get(symbol) else { return 0.0 };
         self.entry_metadata.iter()
             .filter_map(|(cid, meta)| {
@@ -229,7 +231,7 @@ impl OrderTracker {
                     return None;
                 }
                 let filled = order.filled_quantity.max(meta.cum_filled_qty);
-                Some((meta.entry_qty - filled).max(0.0) * meta.entry_price)
+                Some(notional_of((meta.entry_qty - filled).max(0.0), meta.entry_price))
             })
             .sum()
     }
@@ -572,5 +574,68 @@ mod tests {
 
         assert_eq!(fills.lock().unwrap().len(), 1);
         assert_eq!(fills.lock().unwrap()[0], "ORD-1");
+    }
+
+    // resting_entry_notional
+
+    fn entry(symbol: &str, cid: &str, qty: f64, price: f64, status: OrderStatus, filled: f64) -> (Order, EntryMetadata) {
+        let mut order = make_order(symbol, cid, Some(cid));
+        order.status = status;
+        order.quantity = qty;
+        order.filled_quantity = filled;
+        let meta = EntryMetadata {
+            slot: None,
+            pending_exits: vec![],
+            fire_once_fill: false,
+            cum_filled_qty: 0.0,
+            entry_price: price,
+            entry_qty: qty,
+        };
+        (order, meta)
+    }
+
+    fn linear(qty: f64, price: f64) -> f64 {
+        qty * price
+    }
+
+    #[test]
+    fn resting_notional_is_the_unfilled_remainder_at_the_entry_price() {
+        let mut t = OrderTracker::new();
+        let (o, m) = entry("ROBOUSDT", "a", 1000.0, 1.875, OrderStatus::New, 0.0);
+        t.track_entry(o, m);
+        let (o, m) = entry("ROBOUSDT", "b", 1000.0, 1.875, OrderStatus::PartiallyFilled, 400.0);
+        t.track_entry(o, m);
+        assert_eq!(t.resting_entry_notional("ROBOUSDT", &linear), 1875.0 + 600.0 * 1.875);
+    }
+
+    #[test]
+    fn a_filled_or_cancelled_entry_rests_nothing() {
+        let mut t = OrderTracker::new();
+        let (o, m) = entry("ROBOUSDT", "a", 1000.0, 1.875, OrderStatus::Filled, 1000.0);
+        t.track_entry(o, m);
+        let (o, m) = entry("ROBOUSDT", "b", 1000.0, 1.875, OrderStatus::Canceled, 0.0);
+        t.track_entry(o, m);
+        assert_eq!(t.resting_entry_notional("ROBOUSDT", &linear), 0.0);
+    }
+
+    #[test]
+    fn another_symbol_is_not_counted() {
+        let mut t = OrderTracker::new();
+        let (o, m) = entry("ROBOUSDT", "a", 1000.0, 1.875, OrderStatus::New, 0.0);
+        t.track_entry(o, m);
+        let (o, m) = entry("AIOUSDT", "b", 5000.0, 0.5, OrderStatus::New, 0.0);
+        t.track_entry(o, m);
+        assert_eq!(t.resting_entry_notional("ROBOUSDT", &linear), 1875.0);
+        assert_eq!(t.resting_entry_notional("XRPUSDT", &linear), 0.0);
+    }
+
+    #[test]
+    fn the_caller_prices_it_so_inverse_contracts_are_not_multiplied_by_price() {
+        let mut t = OrderTracker::new();
+        // 10 contracts of $100 on BTCUSD_PERP at $60,000: $1,000, not $600,000.
+        let (o, m) = entry("BTCUSD_PERP", "a", 10.0, 60_000.0, OrderStatus::New, 0.0);
+        t.track_entry(o, m);
+        let inverse = |qty: f64, _price: f64| qty * 100.0;
+        assert_eq!(t.resting_entry_notional("BTCUSD_PERP", &inverse), 1000.0);
     }
 }
