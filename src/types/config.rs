@@ -95,7 +95,14 @@ pub struct WatchdogLink {
     /// dropped message costs nothing.
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_interval_secs: u64,
-    /// Hard ceiling on a send. Trading must never wait on the watchdog.
+    /// Hard ceiling on one heartbeat's send. Trading never waits on the
+    /// watchdog whatever this is — each beat runs on its own task and the
+    /// next goes out on schedule regardless — so this only bounds how long a
+    /// single beat may wait for an answer before it is counted as failed.
+    /// Generous because a beat carries the bot's whole claim set, and a wide
+    /// book is several round trips on a cross-region path (2026-09-02: a
+    /// healthy bot's recovery beats overran the old 2s and prolonged its
+    /// PRESUMED_DEAD window by ~24s).
     #[serde(default = "default_send_timeout_secs")]
     pub send_timeout_secs: u64,
 }
@@ -105,7 +112,7 @@ fn default_heartbeat_secs() -> u64 {
 }
 
 fn default_send_timeout_secs() -> u64 {
-    2
+    15
 }
 
 /// Lab-facing API settings (`tradectl-bot-api`, `:9103` by default) — the
