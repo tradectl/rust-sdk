@@ -469,7 +469,7 @@ fn default_provider() -> String { "Binance".into() }
 ///
 /// Every key is optional and defaults to the engine's Binance USD-M numbers.
 /// `0` **disables** the mechanism a key names rather than setting a zero
-/// limit: `chaseBurst: 0` means no per-order allowance, `perSec: 0` means no
+/// limit: `perOrderBurst: 0` means no per-order allowance, `perSec: 0` means no
 /// shared bucket (entries are then admitted on the local send counts and the
 /// venue's headers alone). Negative values clamp to `0` and therefore disable.
 ///
@@ -481,47 +481,51 @@ fn default_provider() -> String { "Binance".into() }
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryBudgetConfig {
-    /// Chase edits one resting order may send at once before it is paced.
-    #[serde(default = "default_chase_burst")]
-    pub chase_burst: i64,
-    /// Past `chaseBurst`, one chase edit per this many milliseconds per order.
-    #[serde(default = "default_chase_delay_ms")]
-    pub chase_delay_ms: i64,
+    /// Sends one resting entry order may make at once before it is paced —
+    /// a placement, an edit, whichever; the allowance follows the order,
+    /// not what the strategy is doing with it.
+    #[serde(default = "default_per_order_burst")]
+    pub per_order_burst: i64,
+    /// Past `perOrderBurst`, one send per this many milliseconds per order.
+    #[serde(default = "default_per_order_delay_ms")]
+    pub per_order_delay_ms: i64,
     /// Shared refill rate of the bot-wide entry bucket, sends per second.
     #[serde(default = "default_per_sec")]
     pub per_sec: f64,
     /// Depth of the shared bucket — how many entry sends may go at once.
     #[serde(default = "default_burst")]
     pub burst: f64,
-    /// Share of an order window of 10 s or less that entries may use. The
-    /// rest is the exit reserve.
-    #[serde(default = "default_line10s")]
-    pub line10s: f64,
-    /// The same for longer windows.
-    #[serde(default = "default_line1m")]
-    pub line1m: f64,
+    /// Share of a short order window — 10 s or less — that entries may
+    /// use. The rest is the exit reserve.
+    #[serde(default = "default_line_short")]
+    pub line_short: f64,
+    /// The same for every longer window.
+    #[serde(default = "default_line_long")]
+    pub line_long: f64,
     /// A fresh placement waits at most this long for room, then is skipped.
+    /// `0` is "send it now or skip it": a placement the budget cannot admit
+    /// on the tick it was asked for is dropped, one that can go, goes.
     #[serde(default = "default_place_max_wait_ms")]
     pub place_max_wait_ms: i64,
 }
 
-fn default_chase_burst() -> i64 { 20 }
-fn default_chase_delay_ms() -> i64 { 250 }
+fn default_per_order_burst() -> i64 { 20 }
+fn default_per_order_delay_ms() -> i64 { 250 }
 fn default_per_sec() -> f64 { 15.0 }
 fn default_burst() -> f64 { 60.0 }
-fn default_line10s() -> f64 { 0.70 }
-fn default_line1m() -> f64 { 0.85 }
+fn default_line_short() -> f64 { 0.70 }
+fn default_line_long() -> f64 { 0.85 }
 fn default_place_max_wait_ms() -> i64 { 2000 }
 
 impl Default for EntryBudgetConfig {
     fn default() -> Self {
         Self {
-            chase_burst: default_chase_burst(),
-            chase_delay_ms: default_chase_delay_ms(),
+            per_order_burst: default_per_order_burst(),
+            per_order_delay_ms: default_per_order_delay_ms(),
             per_sec: default_per_sec(),
             burst: default_burst(),
-            line10s: default_line10s(),
-            line1m: default_line1m(),
+            line_short: default_line_short(),
+            line_long: default_line_long(),
             place_max_wait_ms: default_place_max_wait_ms(),
         }
     }
@@ -1467,17 +1471,17 @@ mod tests {
     fn entry_budget_parses_the_documented_camel_case_keys() {
         let cfg: ApiConfig = serde_json::from_str(
             r#"{"provider":"Binance","entryBudget":{
-                "chaseBurst":5,"chaseDelayMs":100,"perSec":10,"burst":30,
-                "line10s":0.6,"line1m":0.8,"placeMaxWaitMs":1500}}"#,
+                "perOrderBurst":5,"perOrderDelayMs":100,"perSec":10,"burst":30,
+                "lineShort":0.6,"lineLong":0.8,"placeMaxWaitMs":1500}}"#,
         )
         .unwrap();
         let b = cfg.entry_budget.expect("block present");
-        assert_eq!(b.chase_burst, 5);
-        assert_eq!(b.chase_delay_ms, 100);
+        assert_eq!(b.per_order_burst, 5);
+        assert_eq!(b.per_order_delay_ms, 100);
         assert_eq!(b.per_sec, 10.0);
         assert_eq!(b.burst, 30.0);
-        assert_eq!(b.line10s, 0.6);
-        assert_eq!(b.line1m, 0.8);
+        assert_eq!(b.line_short, 0.6);
+        assert_eq!(b.line_long, 0.8);
         assert_eq!(b.place_max_wait_ms, 1500);
     }
 
@@ -1492,11 +1496,11 @@ mod tests {
         let b = cfg.entry_budget.expect("block present");
         assert_eq!(b.per_sec, 0.0, "0 is preserved: it disables the bucket");
         assert_eq!(b, EntryBudgetConfig { per_sec: 0.0, ..Default::default() });
-        assert_eq!(b.chase_burst, 20);
-        assert_eq!(b.chase_delay_ms, 250);
+        assert_eq!(b.per_order_burst, 20);
+        assert_eq!(b.per_order_delay_ms, 250);
         assert_eq!(b.burst, 60.0);
-        assert_eq!(b.line10s, 0.70);
-        assert_eq!(b.line1m, 0.85);
+        assert_eq!(b.line_short, 0.70);
+        assert_eq!(b.line_long, 0.85);
         assert_eq!(b.place_max_wait_ms, 2000);
     }
 
@@ -1507,14 +1511,14 @@ mod tests {
     #[test]
     fn entry_budget_round_trips_in_camel_case() {
         let cfg: ApiConfig = serde_json::from_str(
-            r#"{"provider":"Binance","entryBudget":{"chaseDelayMs":300}}"#,
+            r#"{"provider":"Binance","entryBudget":{"perOrderDelayMs":300}}"#,
         )
         .unwrap();
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(out.contains(r#""entryBudget":{"#), "got: {out}");
-        assert!(out.contains(r#""chaseDelayMs":300"#), "got: {out}");
+        assert!(out.contains(r#""perOrderDelayMs":300"#), "got: {out}");
         assert!(out.contains(r#""placeMaxWaitMs":2000"#), "got: {out}");
-        assert!(!out.contains("chase_delay_ms"), "snake_case leaked: {out}");
+        assert!(!out.contains("per_order_delay_ms"), "snake_case leaked: {out}");
         let back: ApiConfig = serde_json::from_str(&out).unwrap();
         assert_eq!(back.entry_budget, cfg.entry_budget);
     }
