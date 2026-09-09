@@ -62,9 +62,11 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogLink>,
     /// Host-resource guard: what the bot is allowed to do when the *machine*
-    /// runs low on memory. Absent means the default level (`observe`), which
-    /// samples and logs and acts nowhere — so an existing config gains the
-    /// telemetry and none of the behaviour. See `engine/RESOURCE-GUARD-SPEC.md`.
+    /// runs low on memory. Absent means the default level (`halt`): the guard
+    /// samples, and on a sustained crossing it raises the bot-wide soft halt —
+    /// no new entries, and everything already open stays under management.
+    /// Closing the book out is `stop`, which stays opt-in. See
+    /// `engine/RESOURCE-GUARD-SPEC.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
@@ -82,16 +84,33 @@ pub struct BotConfig {
 pub enum ResourceLevel {
     /// Nothing at all — no sampler thread.
     Off,
-    /// Sample and log. Acts nowhere. The default.
+    /// Sample and log. Acts nowhere.
     Observe,
     /// Also send a Telegram message on a crossing.
     Warn,
     /// Also raise the bot-wide soft halt: no new entries, everything open
-    /// stays under management.
+    /// stays under management. The default: a halt costs a missed entry, and
+    /// the failure it stands against is a SIGKILL that leaves every virtual
+    /// stop-loss dead and every position open on the venue. It does not clear
+    /// itself — the guard only raises the flag, so a halted bot waits for an
+    /// operator's `/start`.
     Halt,
     /// Also close the book out and exit.
     Stop,
 }
+
+/// What a config that says nothing about `resources` gets.
+///
+/// `halt` and not `observe`: the guard's whole reason to exist is that the
+/// kernel's OOM killer sends SIGKILL — no cleanup, no log line, every RAM-only
+/// stop-loss gone while the positions stay open on the venue. A default that
+/// only writes a log line leaves that outcome in place for every operator who
+/// never edits the key. A halt is the cheapest action that changes it: it costs
+/// entries the bot would have taken, and nothing that is already open.
+///
+/// `stop` is deliberately NOT the default — closing a book out is destructive
+/// and irreversible, and it stays an explicit opt-in.
+pub const DEFAULT_RESOURCE_LEVEL: ResourceLevel = ResourceLevel::Halt;
 
 impl ResourceLevel {
     /// Parse a config value. `None` for anything unrecognised, so the caller
@@ -132,15 +151,16 @@ pub struct ResourceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     /// Legacy switch, read only when `level` is absent: `false` is `off`,
-    /// `true` is `observe`.
+    /// `true` is the default level (`halt`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
 }
 
 impl ResourceConfig {
     /// The configured level, plus anything the caller should log about how it
-    /// got there. `{}` is `observe`; an unknown `level` is `observe`; a
-    /// document carrying both keys takes `level` and says so.
+    /// got there. `{}` is [`DEFAULT_RESOURCE_LEVEL`]; an unknown `level` is the
+    /// same default rather than a parse failure; a document carrying both keys
+    /// takes `level` and says so.
     pub fn resolve(&self) -> (ResourceLevel, Vec<String>) {
         let mut notes = Vec::new();
         let level = match self.level.as_deref() {
@@ -153,14 +173,15 @@ impl ResourceConfig {
                 }
                 ResourceLevel::parse(raw).unwrap_or_else(|| {
                     notes.push(format!(
-                        "resource guard: unknown level \"{raw}\" — using observe",
+                        "resource guard: unknown level \"{raw}\" — using {}",
+                        DEFAULT_RESOURCE_LEVEL.as_str(),
                     ));
-                    ResourceLevel::Observe
+                    DEFAULT_RESOURCE_LEVEL
                 })
             }
             None => match self.enable {
                 Some(false) => ResourceLevel::Off,
-                Some(true) | None => ResourceLevel::Observe,
+                Some(true) | None => DEFAULT_RESOURCE_LEVEL,
             },
         };
         (level, notes)
@@ -1876,32 +1897,49 @@ mod log_config_tests {
 
 #[cfg(test)]
 mod resource_config_tests {
-    use super::{BotConfig, ResourceConfig, ResourceLevel};
+    use super::{BotConfig, ResourceConfig, ResourceLevel, DEFAULT_RESOURCE_LEVEL};
 
+    /// The default is an action, not a log line. Pinned as a value rather than
+    /// only through `DEFAULT_RESOURCE_LEVEL`, so moving the constant has to
+    /// come with a deliberate edit here.
     #[test]
-    fn resources_empty_block_is_observe() {
-        let cfg: ResourceConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.resolve(), (ResourceLevel::Observe, Vec::new()));
+    fn the_default_level_is_halt() {
+        assert_eq!(DEFAULT_RESOURCE_LEVEL, ResourceLevel::Halt);
+        assert!(DEFAULT_RESOURCE_LEVEL < ResourceLevel::Stop, "a close-out is never a default");
     }
 
     #[test]
-    fn resources_absent_block_is_observe() {
+    fn resources_empty_block_is_the_default() {
+        let cfg: ResourceConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.resolve(), (DEFAULT_RESOURCE_LEVEL, Vec::new()));
+    }
+
+    #[test]
+    fn resources_absent_block_is_the_default() {
         let cfg: BotConfig = serde_json::from_str(r#"{"strats":[]}"#).unwrap();
         assert!(cfg.resources.is_none());
-        assert_eq!(cfg.resources.unwrap_or_default().resolve().0, ResourceLevel::Observe);
+        assert_eq!(
+            cfg.resources.unwrap_or_default().resolve().0,
+            DEFAULT_RESOURCE_LEVEL,
+        );
     }
 
     /// A typo must not refuse the whole document. This is the failure the
     /// `String` field exists to prevent — a derived enum makes it a hard
     /// serde error on `BotConfig`, not on this one field.
+    ///
+    /// It falls back to the default, not to `observe`: a config that meant to
+    /// name a level and misspelled it must not end up quieter than one that
+    /// said nothing at all.
     #[test]
-    fn resources_unknown_level_loads_as_observe_and_says_so() {
+    fn resources_unknown_level_loads_as_the_default_and_says_so() {
         let cfg: BotConfig =
             serde_json::from_str(r#"{"strats":[],"resources":{"level":"hault"}}"#).unwrap();
         let (level, notes) = cfg.resources.unwrap().resolve();
-        assert_eq!(level, ResourceLevel::Observe);
+        assert_eq!(level, DEFAULT_RESOURCE_LEVEL);
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("hault"), "{}", notes[0]);
+        assert!(notes[0].contains(DEFAULT_RESOURCE_LEVEL.as_str()), "{}", notes[0]);
     }
 
     #[test]
@@ -1909,7 +1947,7 @@ mod resource_config_tests {
         let off: ResourceConfig = serde_json::from_str(r#"{"enable":false}"#).unwrap();
         assert_eq!(off.resolve().0, ResourceLevel::Off);
         let on: ResourceConfig = serde_json::from_str(r#"{"enable":true}"#).unwrap();
-        assert_eq!(on.resolve().0, ResourceLevel::Observe);
+        assert_eq!(on.resolve().0, DEFAULT_RESOURCE_LEVEL);
 
         let both: ResourceConfig =
             serde_json::from_str(r#"{"level":"stop","enable":false}"#).unwrap();
