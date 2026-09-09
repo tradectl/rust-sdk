@@ -62,10 +62,10 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogLink>,
     /// Host-resource guard: what the bot is allowed to do when the *machine*
-    /// runs low on memory. Absent means the default level (`halt`): the guard
-    /// samples, and on a sustained crossing it raises the bot-wide soft halt —
-    /// no new entries, and everything already open stays under management.
-    /// Closing the book out is `stop`, which stays opt-in. See
+    /// runs low on memory. Absent means the default level (`stop`): the guard
+    /// samples, warns, soft-halts, and — if the machine keeps falling — closes
+    /// every position at market, cancels the book, and exits `71` without
+    /// coming back. Set `level` explicitly to take less than that. See
     /// `engine/RESOURCE-GUARD-SPEC.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceConfig>,
@@ -89,28 +89,33 @@ pub enum ResourceLevel {
     /// Also send a Telegram message on a crossing.
     Warn,
     /// Also raise the bot-wide soft halt: no new entries, everything open
-    /// stays under management. The default: a halt costs a missed entry, and
-    /// the failure it stands against is a SIGKILL that leaves every virtual
-    /// stop-loss dead and every position open on the venue. It does not clear
-    /// itself — the guard only raises the flag, so a halted bot waits for an
-    /// operator's `/start`.
+    /// stays under management. It does not clear itself — the guard only
+    /// raises the flag, so a halted bot waits for an operator's `/start`.
     Halt,
-    /// Also close the book out and exit.
+    /// Also close the book out and exit. The default — see
+    /// [`DEFAULT_RESOURCE_LEVEL`].
     Stop,
 }
 
 /// What a config that says nothing about `resources` gets.
 ///
-/// `halt` and not `observe`: the guard's whole reason to exist is that the
-/// kernel's OOM killer sends SIGKILL — no cleanup, no log line, every RAM-only
-/// stop-loss gone while the positions stay open on the venue. A default that
-/// only writes a log line leaves that outcome in place for every operator who
-/// never edits the key. A halt is the cheapest action that changes it: it costs
-/// entries the bot would have taken, and nothing that is already open.
+/// **`stop` — the full ladder, close-out included.** No existing config has a
+/// `resources` block, so this is what almost every bot runs. The guard's whole
+/// reason to exist is that the kernel's OOM killer sends SIGKILL: no cleanup, no
+/// log line, every RAM-only stop-loss gone while the positions stay open on the
+/// venue. Anything short of `stop` leaves that outcome reachable — a halted bot
+/// still holds its positions, and the kernel can still kill it.
 ///
-/// `stop` is deliberately NOT the default — closing a book out is destructive
-/// and irreversible, and it stays an explicit opt-in.
-pub const DEFAULT_RESOURCE_LEVEL: ResourceLevel = ResourceLevel::Halt;
+/// **The trade, stated plainly, because this default can lose money.** A false
+/// stop closes real positions at market and leaves the bot off until a human
+/// restarts it: bounded, visible, and it leaves nothing naked. What it prevents
+/// is unbounded and silent. The residual risk is that `MIN_STOP_MARGIN` — the
+/// memory a flatten needs to finish — is an unmeasured estimate; see
+/// `engine/RESOURCE-GUARD-SPEC.md` §2 and §8.
+///
+/// `level` is how an operator takes less: `halt` stops at the soft halt, `warn`
+/// at the Telegram, `observe` at the log line, `off` at nothing.
+pub const DEFAULT_RESOURCE_LEVEL: ResourceLevel = ResourceLevel::Stop;
 
 impl ResourceLevel {
     /// Parse a config value. `None` for anything unrecognised, so the caller
@@ -151,7 +156,7 @@ pub struct ResourceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     /// Legacy switch, read only when `level` is absent: `false` is `off`,
-    /// `true` is the default level (`halt`).
+    /// `true` is the default level (`stop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
 }
@@ -1899,13 +1904,13 @@ mod log_config_tests {
 mod resource_config_tests {
     use super::{BotConfig, ResourceConfig, ResourceLevel, DEFAULT_RESOURCE_LEVEL};
 
-    /// The default is an action, not a log line. Pinned as a value rather than
-    /// only through `DEFAULT_RESOURCE_LEVEL`, so moving the constant has to
-    /// come with a deliberate edit here.
+    /// The default is the whole ladder, close-out included. Pinned as a value
+    /// rather than only through `DEFAULT_RESOURCE_LEVEL`, so moving the
+    /// constant has to come with a deliberate edit here — this is the one
+    /// config value that can close a book nobody asked to close.
     #[test]
-    fn the_default_level_is_halt() {
-        assert_eq!(DEFAULT_RESOURCE_LEVEL, ResourceLevel::Halt);
-        assert!(DEFAULT_RESOURCE_LEVEL < ResourceLevel::Stop, "a close-out is never a default");
+    fn the_default_level_is_stop() {
+        assert_eq!(DEFAULT_RESOURCE_LEVEL, ResourceLevel::Stop);
     }
 
     #[test]
