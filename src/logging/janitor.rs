@@ -121,7 +121,15 @@ fn gzip_file(path: &Path) -> io::Result<()> {
         PathBuf::from(p)
     };
 
-    {
+    // Every `?` between creating `<path>.gz` and finishing it used to leave the
+    // half-written output behind, and the caller only logs. On a disk that is
+    // filling — which is exactly when a compression fails — that is one partial
+    // `.gz` per rotation, each roughly the size of a day's log, and nothing
+    // ever deleted them. The compression itself is also the transient the disk
+    // guard's five-minute Warn sustain exists to sit out: `<path>.gz` is
+    // written to completion while the original still exists, so free space
+    // falls for minutes before recovering.
+    let compressed = (|| -> io::Result<()> {
         let input = File::open(path)?;
         let output = File::create(&gz_path)?;
         let mut reader = BufReader::new(input);
@@ -134,7 +142,11 @@ fn gzip_file(path: &Path) -> io::Result<()> {
             }
             encoder.write_all(&buf[..n])?;
         }
-        encoder.finish()?.flush()?;
+        encoder.finish()?.flush()
+    })();
+    if let Err(e) = compressed {
+        let _ = std::fs::remove_file(&gz_path);
+        return Err(e);
     }
 
     std::fs::remove_file(path)?;
@@ -144,6 +156,37 @@ fn gzip_file(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed compression leaves no partial `.gz` behind.
+    ///
+    /// Every `?` in the encode loop used to abandon the output file, and the
+    /// caller only logs — so on a disk that is filling, which is exactly when a
+    /// compression fails, that is one partial `.gz` per rotation, each roughly
+    /// a day's log, and nothing ever deleted them.
+    ///
+    /// Driven by making the *input* unreadable after the output exists, which
+    /// is the shape the loop's first `?` takes.
+    #[test]
+    fn a_failed_compression_removes_its_own_partial_output() {
+        let dir = std::env::temp_dir().join(format!("tc-gz-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let missing = dir.join("bncm.2026-09-12.log");
+        let gz = dir.join("bncm.2026-09-12.log.gz");
+        // No input file: `File::open` fails before the output is made, so
+        // nothing to clean. The real check is the other order.
+        assert!(gzip_file(&missing).is_err());
+        assert!(!gz.exists());
+
+        // Now an input that exists but cannot be read past the open: a
+        // directory. `read` fails inside the loop, after the output was
+        // created.
+        let as_dir = dir.join("bncm.2026-09-13.log");
+        let as_gz = dir.join("bncm.2026-09-13.log.gz");
+        let _ = std::fs::create_dir_all(&as_dir);
+        let _ = gzip_file(&as_dir);
+        assert!(!as_gz.exists(), "a failed compression must not leave its partial output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn touch(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let p = dir.join(name);

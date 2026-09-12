@@ -54,6 +54,27 @@ static LOG_GUARDS: OnceCell<Mutex<Vec<WorkerGuard>>> = OnceCell::new();
 static JANITOR: OnceCell<crate::logging::LogJanitor> = OnceCell::new();
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
 
+/// Where the file appender was actually built, set once on its success arm.
+static RESOLVED_LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The appender's dropped-line counter, from the same place.
+static LOG_DROPPED: std::sync::OnceLock<tracing_appender::non_blocking::ErrorCounter> =
+    std::sync::OnceLock::new();
+
+/// The directory the log appender is writing to, or `None` when file logging is
+/// off (`retentionDays == 0`) or the appender failed to build. The disk guard
+/// watches this filesystem; a `None` means it is not watched at all, and the
+/// startup line says so.
+pub fn resolved_log_dir() -> Option<PathBuf> {
+    RESOLVED_LOG_DIR.get().cloned()
+}
+
+/// How many log lines the appender has dropped because the filesystem could not
+/// keep up. Feeds no line — a `/status` diagnostic and a log line only.
+pub fn log_lines_dropped() -> Option<usize> {
+    LOG_DROPPED.get().map(|c| c.dropped_lines())
+}
+
 /// Optional extra layer installed by callers (e.g. `tradectl-core` with
 /// `feature="api"`) before `setup_logging` runs. Consumed once by
 /// `init_inner`. Stored as a `Box<dyn Any>` so the SDK itself does not
@@ -158,6 +179,25 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
         match appender_result {
             Ok(appender) => {
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+                // The directory the appender ACTUALLY resolved, recorded on the
+                // success arm where it was built.
+                //
+                // Not `config.log.path`, and not `current_log_file`, which is a
+                // pure function of the config it is handed: `setup_logging` is a
+                // process-level `call_once`, so an in-process respawn keeps the
+                // path resolved on the FIRST run while anything rebuilt from the
+                // current config would name a directory nothing writes to. A
+                // disk guard armed against that filesystem watches the wrong
+                // volume for the life of the process.
+                let _ = RESOLVED_LOG_DIR.set(dir.clone());
+                // The appender's own backlog counter. It does NOT see a fast
+                // ENOSPC — the worker's `write_all` fails immediately and the
+                // queue never backs up — it sees a slow or wedged filesystem,
+                // which is the stall condition `statvfs` cannot report because
+                // `statvfs` is the thing hanging. Diagnostic only: a rising
+                // count also means "the bot logged more than the queue holds",
+                // which is a log storm on a healthy disk.
+                let _ = LOG_DROPPED.set(non_blocking.error_counter());
                 guards.push(guard);
                 layers.push(make_layer(non_blocking));
 
