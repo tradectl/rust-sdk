@@ -117,6 +117,24 @@ pub enum ResourceLevel {
 /// at the Telegram, `observe` at the log line, `off` at nothing.
 pub const DEFAULT_RESOURCE_LEVEL: ResourceLevel = ResourceLevel::Stop;
 
+/// What a config that says nothing about `resources.disk` gets.
+///
+/// **`stop` — the full ladder.** A bot whose disk fills keeps trading correctly
+/// and stops keeping a record: every closed trade is dropped, and the warning
+/// about it is written to a log file that is also failing. Nothing today
+/// watches for it.
+///
+/// The argument for acting rather than halting is that a halt has no exit
+/// condition — a full disk does not clear itself — so the operator's remedy
+/// ends in a restart, and a restarted bot starts blank: it does not adopt the
+/// position and does not re-arm a stop that lived only in RAM. A stop leaves
+/// the book flat and makes that restart safe. What a false stop costs is
+/// realized P&L on positions closed early and a bot that is off until a human
+/// starts it — bounded, visible, and it leaves nothing naked.
+///
+/// `disk` is how an operator takes less: `halt`, `warn`, `observe`, `off`.
+pub const DEFAULT_DISK_LEVEL: ResourceLevel = ResourceLevel::Stop;
+
 impl ResourceLevel {
     /// Parse a config value. `None` for anything unrecognised, so the caller
     /// can say what it ignored rather than failing the whole document.
@@ -159,6 +177,12 @@ pub struct ResourceConfig {
     /// `true` is the default level (`stop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
+    /// The **disk** guard's level, independent of `level` (which keeps its
+    /// shipped meaning: host memory and CPU). Same five values, parsed the same
+    /// forgiving way. Absent means [`DEFAULT_DISK_LEVEL`]. See
+    /// `engine/DISK-GUARD-SPEC.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<String>,
 }
 
 impl ResourceConfig {
@@ -190,6 +214,43 @@ impl ResourceConfig {
             },
         };
         (level, notes)
+    }
+
+    /// Both halves at once: `(memory, disk, notes)`.
+    ///
+    /// `level` and `disk` are independent knobs, and legacy `enable` is read
+    /// **only when `level` is absent** — the shipped precedence, extended to
+    /// the disk half so that a config written before `level` existed keeps
+    /// meaning what it meant. The one case worth a note is
+    /// `{"enable": false, "disk": "halt"}`, which an operator would plausibly
+    /// write meaning "memory off, disk on" and which does not mean that.
+    pub fn resolve_all(&self) -> (ResourceLevel, ResourceLevel, Vec<String>) {
+        let (memory, mut notes) = self.resolve();
+        // `enable: false` with no `level` turns the whole guard off, both
+        // halves. With a `level` present it is retired and says nothing about
+        // either half.
+        let disabled_by_enable = self.level.is_none() && self.enable == Some(false);
+        let disk = if disabled_by_enable {
+            if let Some(raw) = self.disk.as_deref() {
+                notes.push(format!(
+                    "resource guard: \"enable\": false turns off the disk guard too — use \
+                     \"level\": \"off\" with \"disk\": \"{raw}\"",
+                ));
+            }
+            ResourceLevel::Off
+        } else {
+            match self.disk.as_deref() {
+                Some(raw) => ResourceLevel::parse(raw).unwrap_or_else(|| {
+                    notes.push(format!(
+                        "resource guard: unknown disk level \"{raw}\" — using {}",
+                        DEFAULT_DISK_LEVEL.as_str(),
+                    ));
+                    DEFAULT_DISK_LEVEL
+                }),
+                None => DEFAULT_DISK_LEVEL,
+            }
+        };
+        (memory, disk, notes)
     }
 }
 
@@ -1984,5 +2045,66 @@ mod resource_config_tests {
             assert_eq!(ResourceLevel::parse(l.as_str()), Some(l));
         }
         assert_eq!(ResourceLevel::parse("nonsense"), None);
+    }
+}
+
+#[cfg(test)]
+mod disk_level_tests {
+    use super::*;
+
+    fn cfg(json: &str) -> ResourceConfig {
+        serde_json::from_str(json).expect("the block parses")
+    }
+
+    /// The whole precedence table, because the reading decides whether a safety
+    /// mechanism runs and the migration path — a config that set `enable`
+    /// before `level` existed and later gained `level` — is the ordinary one.
+    #[test]
+    fn the_two_levels_resolve_independently() {
+        let cases: [(&str, ResourceLevel, ResourceLevel); 8] = [
+            ("{}", DEFAULT_RESOURCE_LEVEL, DEFAULT_DISK_LEVEL),
+            (r#"{"level":"warn"}"#, ResourceLevel::Warn, DEFAULT_DISK_LEVEL),
+            (r#"{"disk":"halt"}"#, DEFAULT_RESOURCE_LEVEL, ResourceLevel::Halt),
+            (r#"{"enable":true,"disk":"halt"}"#, DEFAULT_RESOURCE_LEVEL, ResourceLevel::Halt),
+            // Legacy `enable: false` with no `level` turns off BOTH halves.
+            (r#"{"enable":false}"#, ResourceLevel::Off, ResourceLevel::Off),
+            (r#"{"enable":false,"disk":"halt"}"#, ResourceLevel::Off, ResourceLevel::Off),
+            // `level`'s presence retires `enable` for both halves.
+            (r#"{"level":"warn","enable":false}"#, ResourceLevel::Warn, DEFAULT_DISK_LEVEL),
+            (
+                r#"{"level":"warn","enable":false,"disk":"halt"}"#,
+                ResourceLevel::Warn,
+                ResourceLevel::Halt,
+            ),
+        ];
+        for (json, mem, disk) in cases {
+            let (m, d, _) = cfg(json).resolve_all();
+            assert_eq!(m, mem, "memory level for {json}");
+            assert_eq!(d, disk, "disk level for {json}");
+        }
+    }
+
+    /// `{"enable": false, "disk": "halt"}` is a config an operator would
+    /// plausibly write meaning "memory off, disk on". It does not mean that,
+    /// and the note says so rather than leaving them to find out from a full
+    /// disk.
+    #[test]
+    fn turning_the_guard_off_the_legacy_way_says_it_took_the_disk_half_too() {
+        let (_, disk, notes) = cfg(r#"{"enable":false,"disk":"halt"}"#).resolve_all();
+        assert_eq!(disk, ResourceLevel::Off);
+        assert!(
+            notes.iter().any(|n| n.contains("turns off the disk guard too")),
+            "the operator has to be told: {notes:?}",
+        );
+    }
+
+    /// A typo in a caution knob must not brick the bot: `BotConfig` is parsed
+    /// as one document, and an unknown variant of a derived enum is a hard
+    /// serde error.
+    #[test]
+    fn an_unknown_disk_level_falls_back_and_says_so() {
+        let (_, disk, notes) = cfg(r#"{"disk":"hault"}"#).resolve_all();
+        assert_eq!(disk, DEFAULT_DISK_LEVEL);
+        assert!(notes.iter().any(|n| n.contains("unknown disk level")), "{notes:?}");
     }
 }

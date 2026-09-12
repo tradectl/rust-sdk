@@ -214,6 +214,24 @@ pub struct StatusInfo {
     pub uptime_secs: u64,
     pub symbol_count: u32,
     pub position_count: u32,
+    /// What the host-resource guard is actually armed at, and the disk guard
+    /// beside it — the effective levels, not the configured ones.
+    ///
+    /// **The guard's evidence must not live only in a log file that is itself
+    /// failing to write.** That is the whole reason these travel: a bot whose
+    /// disk is full is a bot whose log is being dropped, so the one place an
+    /// operator can still read what the guard sees is the control port. A bot
+    /// configured `stop` and running `halt` — because its machine is too small
+    /// to flatten safely, or because it closed out for a full disk within the
+    /// cooldown — reads as fully armed without them.
+    ///
+    /// Empty on an older bot, which is why both are `#[serde(default)]` on the
+    /// wire side.
+    pub resources: String,
+    /// The disk guard's line: its effective level, every watched volume with
+    /// its free space and share, and `parked at halt` where a stop could not be
+    /// recorded. Newline-separated; one line per volume after the first.
+    pub disk: String,
 }
 
 /// Read-only access to a bot's identity + uptime + counts.
