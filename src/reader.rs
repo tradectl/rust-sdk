@@ -232,6 +232,10 @@ pub struct StatusInfo {
     /// its free space and share, and `parked at halt` where a stop could not be
     /// recorded. Newline-separated; one line per volume after the first.
     pub disk: String,
+    /// The configured-leverage line (`api.leverage`): what was set, and which
+    /// symbols are deferred, refused, have no cap yet, were clamped by the
+    /// venue or were moved by another process. Empty when the key is absent.
+    pub leverage: String,
 }
 
 /// Read-only access to a bot's identity + uptime + counts.

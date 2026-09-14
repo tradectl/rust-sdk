@@ -408,7 +408,7 @@ Three more constructors, for errors that never pass through a response parser:
 ```rust
 pub struct BotConfig {
     pub telegram: Option<TelegramConfig>,      // bot_token, chat_id, send_interval
-    pub api: ApiConfig,                        // provider, key, secret, ws, wallet_address, private_key, passphrase, autoAdjustLeverage, hedgeMode
+    pub api: ApiConfig,                        // provider, key, secret, ws, wallet_address, private_key, passphrase, autoAdjustLeverage, hedgeMode, entryBudget, leverage (N | "max", Binance only — validate_leverage)
     pub limits: Option<LimitsConfig>,          // max_loss_limit
     pub db: Option<DbConfig>,                  // path
     pub log: Option<LogConfig>,                // path, mode, level
