@@ -631,6 +631,104 @@ pub struct ApiConfig {
     /// restart like every other `api` change. See `EntryBudgetConfig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_budget: Option<EntryBudgetConfig>,
+    /// The leverage the bot sets on each traded symbol: an integer `1..=125`,
+    /// or `"max"` for the symbol's exchange maximum. Always capped at that
+    /// maximum. A symbol holding a position is left alone until it is flat.
+    /// Absent means the bot never chooses a leverage (the account's own
+    /// setting stands). Binance only — see [`validate_leverage`]. Read at
+    /// bootstrap, so a change is a restart like every other `api` change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leverage: Option<LeverageTarget>,
+}
+
+/// `api.leverage`: what the bot sets on the venue per symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeverageTarget {
+    /// Set `min(n, the symbol's cap)`.
+    Fixed(u32),
+    /// Set the symbol's cap (its first leverage bracket).
+    Max,
+}
+
+/// Binance's own range for `POST /leverage`. A typo guard, not a venue
+/// claim: every value is capped at the symbol's bracket again at apply time.
+pub const LEVERAGE_RANGE: std::ops::RangeInclusive<u32> = 1..=125;
+
+impl LeverageTarget {
+    /// The value to send for a symbol whose cap is `cap`.
+    pub fn resolve(self, cap: u32) -> u32 {
+        match self {
+            LeverageTarget::Fixed(n) => n.min(cap),
+            LeverageTarget::Max => cap,
+        }
+    }
+}
+
+impl std::fmt::Display for LeverageTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeverageTarget::Fixed(n) => write!(f, "{n}x"),
+            LeverageTarget::Max => f.write_str("max"),
+        }
+    }
+}
+
+impl serde::Serialize for LeverageTarget {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            LeverageTarget::Fixed(n) => s.serialize_u32(*n),
+            LeverageTarget::Max => s.serialize_str("max"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LeverageTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        match &v {
+            serde_json::Value::Number(n) => match n.as_u64() {
+                Some(n) if n <= u32::MAX as u64 && LEVERAGE_RANGE.contains(&(n as u32)) => {
+                    Ok(LeverageTarget::Fixed(n as u32))
+                }
+                _ => Err(D::Error::custom(format!(
+                    "api.leverage: {v} is not a whole number from 1 to 125, or \"max\""
+                ))),
+            },
+            serde_json::Value::String(t) if t.eq_ignore_ascii_case("max") => Ok(LeverageTarget::Max),
+            _ => Err(D::Error::custom(format!(
+                "api.leverage: {v} is not a whole number from 1 to 125, or \"max\""
+            ))),
+        }
+    }
+}
+
+/// The rules `api.leverage` must meet beyond its own syntax. One function so
+/// the CLI (start and every post-apply reload) and the Lab import path cannot
+/// disagree: a key the Lab accepts and the CLI refuses is a process exit on
+/// the respawn, with the book left open.
+pub fn validate_leverage(config: &BotConfig) -> Result<(), String> {
+    let Some(target) = config.api.leverage else { return Ok(()) };
+    if !config.api.provider.eq_ignore_ascii_case("binance") {
+        return Err(format!(
+            "api.leverage is supported on Binance only (provider is {})",
+            config.api.provider
+        ));
+    }
+    // Over ENABLED entries: the CLI strips disabled ones before it validates,
+    // and this must agree with it or a doc the Lab accepted exits the CLI on
+    // the respawn. No enabled strategy at all is not "paper-only" — nothing
+    // trades, and the keeper is never built.
+    let mut enabled = config.strats.iter().filter(|e| !e.disable).peekable();
+    let paper_only = enabled.peek().is_some() && enabled.all(|e| e.is_emulator);
+    if target == LeverageTarget::Max && paper_only {
+        return Err(
+            "api.leverage: \"max\" needs API keys to read the exchange's caps; \
+             use a number for a paper-only bot"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl Default for ApiConfig {
@@ -647,6 +745,7 @@ impl Default for ApiConfig {
             hedge_mode: None,
             env: None,
             entry_budget: None,
+            leverage: None,
         }
     }
 }
@@ -2106,5 +2205,102 @@ mod disk_level_tests {
         let (_, disk, notes) = cfg(r#"{"disk":"hault"}"#).resolve_all();
         assert_eq!(disk, DEFAULT_DISK_LEVEL);
         assert!(notes.iter().any(|n| n.contains("unknown disk level")), "{notes:?}");
+    }
+}
+
+#[cfg(test)]
+mod leverage_tests {
+    use super::*;
+
+    fn api(json: &str) -> Result<ApiConfig, String> {
+        serde_json::from_str::<ApiConfig>(json).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_whole_number_or_max_parses() {
+        assert_eq!(api(r#"{"leverage":10}"#).unwrap().leverage, Some(LeverageTarget::Fixed(10)));
+        assert_eq!(api(r#"{"leverage":1}"#).unwrap().leverage, Some(LeverageTarget::Fixed(1)));
+        assert_eq!(api(r#"{"leverage":125}"#).unwrap().leverage, Some(LeverageTarget::Fixed(125)));
+        assert_eq!(api(r#"{"leverage":"max"}"#).unwrap().leverage, Some(LeverageTarget::Max));
+        assert_eq!(api(r#"{"leverage":"MAX"}"#).unwrap().leverage, Some(LeverageTarget::Max));
+    }
+
+    #[test]
+    fn an_absent_key_is_none_and_is_not_written_back() {
+        let a = api("{}").unwrap();
+        assert_eq!(a.leverage, None);
+        let out = serde_json::to_value(&a).unwrap();
+        assert!(out.get("leverage").is_none(), "absent must stay absent: {out}");
+    }
+
+    #[test]
+    fn it_round_trips() {
+        for v in [LeverageTarget::Fixed(20), LeverageTarget::Max] {
+            let a = ApiConfig { leverage: Some(v), ..Default::default() };
+            let back: ApiConfig = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+            assert_eq!(back.leverage, Some(v));
+        }
+    }
+
+    /// Every refusal names the value, so the operator can find it in the file.
+    #[test]
+    fn anything_else_is_refused_with_the_value_in_the_message() {
+        for (bad, shown) in [
+            ("0", "0"), ("126", "126"), ("-1", "-1"), ("10.5", "10.5"),
+            (r#""maximum""#, "maximum"), ("true", "true"), ("4294967306", "4294967306"),
+        ] {
+            let err = api(&format!(r#"{{"leverage":{bad}}}"#)).expect_err(bad);
+            assert!(err.contains(shown) && err.contains("api.leverage"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn resolve_caps_at_the_symbol_maximum() {
+        assert_eq!(LeverageTarget::Fixed(10).resolve(25), 10);
+        assert_eq!(LeverageTarget::Fixed(30).resolve(25), 25);
+        assert_eq!(LeverageTarget::Max.resolve(25), 25);
+    }
+
+    #[test]
+    fn validation_reads_enabled_strategies_only() {
+        // One enabled paper entry, one disabled live entry: the CLI strips the
+        // disabled one, so this is a paper-only bot and "max" is refused.
+        let mut c = bot("Binance", Some(LeverageTarget::Max), &[true, false]);
+        c.strats[1].disable = true;
+        assert!(validate_leverage(&c).is_err());
+        // Nothing enabled: nothing trades, nothing to refuse.
+        let mut c = bot("Binance", Some(LeverageTarget::Max), &[false]);
+        c.strats[0].disable = true;
+        assert!(validate_leverage(&c).is_ok());
+    }
+
+    fn bot(provider: &str, leverage: Option<LeverageTarget>, emulators: &[bool]) -> BotConfig {
+        let mut c = BotConfig::default();
+        c.api.provider = provider.to_string();
+        c.api.leverage = leverage;
+        for &is_emulator in emulators {
+            let mut e: StratEntry = serde_json::from_value(serde_json::json!({
+                "name": "s", "type": "shot", "marketType": "LINEAR", "pairs": ["BTCUSDT"]
+            }))
+            .unwrap();
+            e.is_emulator = is_emulator;
+            c.strats.push(e);
+        }
+        c
+    }
+
+    #[test]
+    fn validation_refuses_other_venues_and_max_without_keys() {
+        assert!(validate_leverage(&bot("Bybit", None, &[false])).is_ok(), "absent is always fine");
+        let e = validate_leverage(&bot("Bybit", Some(LeverageTarget::Fixed(10)), &[false])).unwrap_err();
+        assert!(e.contains("Binance only") && e.contains("Bybit"), "{e}");
+        assert!(validate_leverage(&bot("Binance", Some(LeverageTarget::Fixed(10)), &[false])).is_ok());
+        assert!(validate_leverage(&bot("binance", Some(LeverageTarget::Max), &[false, true])).is_ok());
+        let e = validate_leverage(&bot("Binance", Some(LeverageTarget::Max), &[true, true])).unwrap_err();
+        assert!(e.contains("paper-only"), "{e}");
+        assert!(
+            validate_leverage(&bot("Binance", Some(LeverageTarget::Fixed(10)), &[true])).is_ok(),
+            "a number is fine on a paper-only bot"
+        );
     }
 }
