@@ -126,6 +126,10 @@ pub fn setup_logging_file_only(name: &str, config: &Option<crate::types::config:
     LOG_INIT.call_once(|| init_inner(name, config, false));
 }
 
+/// Set by the CLI on a detached child, whose stderr is a file rather than a
+/// terminal. Read only by [`init_inner`].
+pub const DAEMON_ENV: &str = "TRADECTL_DAEMON";
+
 fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, console: bool) {
     let safe_name = sanitize_bot_name(name);
 
@@ -158,7 +162,14 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
     let mut guards: Vec<WorkerGuard> = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
-    if console {
+    // A daemon's stderr is a FILE (`<bot>.stderr.log`), opened by the CLI so
+    // that a panic message or an allocator abort — written straight to fd 2 by
+    // the Rust runtime — is not lost. It is not a console, and the janitor
+    // does not rotate, compress or prune it: a stderr layer there wrote a
+    // second, permanent copy of every line, 1.6 GB of it in under three hours
+    // on 2026-09-17. Foreground runs still get their console.
+    let daemon = std::env::var_os(DAEMON_ENV).is_some();
+    if console && !daemon {
         layers.push(make_layer(std::io::stderr));
     }
 
