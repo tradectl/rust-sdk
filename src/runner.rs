@@ -126,9 +126,33 @@ pub fn setup_logging_file_only(name: &str, config: &Option<crate::types::config:
     LOG_INIT.call_once(|| init_inner(name, config, false));
 }
 
-/// Set by the CLI on a detached child, whose stderr is a file rather than a
-/// terminal. Read only by [`init_inner`].
-pub const DAEMON_ENV: &str = "TRADECTL_DAEMON";
+/// Set by [`suppress_console_logging`] on a detached child.
+static CONSOLE_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Leave the stderr layer out of the logger this process is about to build.
+///
+/// The CLI calls it on the child it detaches, whose fd 2 is an append-only
+/// file (`<bot>.stderr.log`) that nothing rotates, rather than a terminal.
+/// A process-local switch and not an environment variable on purpose: that
+/// is inherited, and `Environment=` in a unit file or an export in a shell
+/// profile would silence the journal of a bot running in the FOREGROUND,
+/// which is how systemd and `docker run` run one. Call before
+/// [`setup_logging`]; after it, the logger is already built and this does
+/// nothing.
+pub fn suppress_console_logging() {
+    CONSOLE_LOGGING.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the stderr layer goes in: the caller's own choice, this process's
+/// switch, and the one case that overrides both — no file layer was built, so
+/// stderr is the only place a line can go. A daemon then writes to its
+/// unrotated capture file, which beats writing nowhere: the states that reach
+/// it (an unwritable log directory, `retentionDays: 0`) are rare and are
+/// exactly when a log is wanted. `console: false` is [`setup_logging_file_only`]
+/// asking for silence — replay diffs its log file — and is never overridden.
+fn want_console(console: bool, suppressed: bool, has_file_layer: bool) -> bool {
+    console && (!suppressed || !has_file_layer)
+}
 
 fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, console: bool) {
     let safe_name = sanitize_bot_name(name);
@@ -161,17 +185,9 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
-
-    // A daemon's stderr is a FILE (`<bot>.stderr.log`), opened by the CLI so
-    // that a panic message or an allocator abort — written straight to fd 2 by
-    // the Rust runtime — is not lost. It is not a console, and the janitor
-    // does not rotate, compress or prune it: a stderr layer there wrote a
-    // second, permanent copy of every line, 1.6 GB of it in under three hours
-    // on 2026-09-17. Foreground runs still get their console.
-    let daemon = std::env::var_os(DAEMON_ENV).is_some();
-    if console && !daemon {
-        layers.push(make_layer(std::io::stderr));
-    }
+    // The file layer goes in first, so the stderr decision below can see
+    // whether anything else is carrying the log.
+    let mut has_file_layer = false;
 
     if retention_days > 0 {
         let dir = resolve_log_dir(base_path.as_deref(), &safe_name);
@@ -211,6 +227,7 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
                 let _ = LOG_DROPPED.set(non_blocking.error_counter());
                 guards.push(guard);
                 layers.push(make_layer(non_blocking));
+                has_file_layer = true;
 
                 // Background gzip + retention sweep.
                 let janitor = crate::logging::LogJanitor::spawn(
@@ -227,6 +244,20 @@ fn init_inner(name: &str, config: &Option<crate::types::config::LogConfig>, cons
                 );
             }
         }
+    }
+
+    // A daemon's stderr is a FILE (`<bot>.stderr.log`), opened by the CLI so
+    // that a panic message or an allocator abort — written straight to fd 2 by
+    // the Rust runtime — is not lost. It is not a console, and the janitor
+    // does not rotate, compress or prune it: a stderr layer there wrote a
+    // second, permanent copy of every line, 1.6 GB of it in under three hours
+    // on 2026-09-17. Foreground runs still get their console.
+    if want_console(
+        console,
+        !CONSOLE_LOGGING.load(std::sync::atomic::Ordering::Relaxed),
+        has_file_layer,
+    ) {
+        layers.push(make_layer(std::io::stderr));
     }
 
     // Consume any extra layer registered before setup_logging was called
@@ -325,8 +356,9 @@ fn default_log_root() -> PathBuf {
 }
 
 /// Route panics through `tracing::error!` so they survive daemon mode
-/// (where stdout/stderr are wired to /dev/null) and end up in the rotating
-/// log file alongside the rest of the bot output.
+/// (where stdout is dropped and stderr is a capture file the app log does
+/// not share) and end up in the rotating log file alongside the rest of the
+/// bot output.
 fn install_panic_hook() {
     static HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
     HOOK_INSTALLED.call_once(|| {
@@ -345,7 +377,8 @@ fn install_panic_hook() {
             };
             tracing::error!(target: "panic", "panic at {location}: {payload}");
             // Still call the default hook so terminal/foreground users see
-            // the standard backtrace; in daemon mode it goes to /dev/null.
+            // the standard backtrace; a daemon's goes to `<bot>.stderr.log`,
+            // which is the whole reason that file is opened.
             default(info);
         }));
     });
@@ -636,5 +669,24 @@ mod logging_tests {
     fn sanitize_falls_back_to_bot_for_empty() {
         assert_eq!(sanitize_bot_name(""), "bot");
         assert_eq!(sanitize_bot_name("   "), "bot");
+    }
+
+    /// The stderr layer's three inputs. `init_inner` builds a subscriber
+    /// behind a process-wide `Once`, so the decision is tested here and the
+    /// wiring is tested by the CLI's daemon test.
+    #[test]
+    fn a_daemon_keeps_its_console_only_when_nothing_else_holds_the_log() {
+        // Foreground: console, whatever the file layer did.
+        assert!(want_console(true, false, true));
+        assert!(want_console(true, false, false));
+        // A daemon's stderr is its unrotated capture file: no second copy.
+        assert!(!want_console(true, true, true));
+        // …unless the file layer is missing (unwritable log dir,
+        // `retentionDays: 0`), when that file is the only place left.
+        assert!(want_console(true, true, false));
+        // `setup_logging_file_only` asks for silence and gets it: replay
+        // diffs its log file against a baseline.
+        assert!(!want_console(false, false, false));
+        assert!(!want_console(false, true, false));
     }
 }
