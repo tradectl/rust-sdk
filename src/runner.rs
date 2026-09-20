@@ -506,13 +506,20 @@ pub fn log_canceled(cid: &str, name: &str, symbol: &str, elapsed_ms: u128) {
 }
 
 /// `[cid][name/symbol] processing KIND order update: status=STATUS`
+///
+/// DEBUG, not INFO like the rest of this family: the venue sends one update per
+/// state an order passes through, so at INFO a busy bot's log is mostly `New`
+/// lines and the ones that say something *happened* are buried. Set
+/// `log.level: "debug"` to get them back — note the Lab's log strip never shows
+/// them, it only carries INFO and above.
 pub fn log_processing(
     cid: &str, name: &str, symbol: &str,
     kind: &str, status: &str,
 ) {
-    log_order(cid, name, symbol, format_args!(
-        "processing {} order update: status={}", kind, status
-    ));
+    log::debug!(
+        "[{}][{}/{}] processing {} order update: status={}",
+        cid, name, symbol, kind, status
+    );
 }
 
 /// `[cid][name/symbol] SL scheduled in Xs`
