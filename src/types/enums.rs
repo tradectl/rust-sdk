@@ -34,7 +34,7 @@ pub enum MarketType {
 
 impl MarketType {
     /// Stable lowercase string used for SQL serialization (e.g. `trades.db.market_type`).
-    /// Do not change — bound by on-disk schema in `~/.tradectl/trades.db`.
+    /// Do not change — bound by the on-disk `trades.db` schema.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Spot => "spot",
