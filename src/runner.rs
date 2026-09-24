@@ -320,7 +320,7 @@ pub fn sanitize_bot_name(name: &str) -> String {
 
 /// Path to today's log file, mirroring what `setup_logging` writes via
 /// `tracing_appender::rolling::Rotation::DAILY`. Honours `LogConfig.path`,
-/// falls back to `~/.tradectl/logs/<safe_name>/`. Returns `None` when
+/// falls back to `~/.tradectl/bot/<safe_name>/logs/`. Returns `None` when
 /// `retention_days == 0` (file logging disabled).
 ///
 /// Used by the CLI to point users at the actual log file on daemon start.
@@ -339,20 +339,13 @@ pub fn current_log_file(
     Some(dir.join(format!("{safe_name}.{today}.log")))
 }
 
+/// An explicit `log.path` is a root shared by bots: `<path>/<bot>/`. Without
+/// one, logs live in the bot's own folder: `~/.tradectl/bot/<bot>/logs/`.
 fn resolve_log_dir(base: Option<&str>, sanitized_name: &str) -> PathBuf {
-    let base_path = match base {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => default_log_root(),
-    };
-    base_path.join(sanitized_name)
-}
-
-fn default_log_root() -> PathBuf {
-    std::env::var("TRADECTL_HOME").ok().map(PathBuf::from)
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tradectl")
-        .join("logs")
+    match base {
+        Some(p) if !p.is_empty() => PathBuf::from(p).join(sanitized_name),
+        _ => crate::paths::bot_logs_dir(sanitized_name),
+    }
 }
 
 /// Route panics through `tracing::error!` so they survive daemon mode
@@ -575,13 +568,13 @@ mod logging_tests {
     #[test]
     fn resolve_log_dir_uses_default_when_path_empty() {
         let p = resolve_log_dir(Some(""), "mybot");
-        assert!(p.ends_with("logs/mybot"), "got {}", p.display());
+        assert!(p.ends_with("bot/mybot/logs"), "got {}", p.display());
     }
 
     #[test]
     fn resolve_log_dir_uses_default_when_path_none() {
         let p = resolve_log_dir(None, "mybot");
-        assert!(p.ends_with("logs/mybot"), "got {}", p.display());
+        assert!(p.ends_with("bot/mybot/logs"), "got {}", p.display());
     }
 
     #[test]
@@ -620,12 +613,12 @@ mod logging_tests {
     fn current_log_file_defaults_when_config_none() {
         let p = current_log_file("mybot", &None).expect("file path");
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let leaf = format!("mybot/mybot.{today}.log");
+        let leaf = format!("bot/mybot/logs/mybot.{today}.log");
         assert!(p.ends_with(&leaf), "got {}", p.display());
     }
 
     #[test]
-    fn default_log_root_prefers_tradectl_home_env() {
+    fn default_log_dir_prefers_tradectl_home_env() {
         // Save and restore HOME / TRADECTL_HOME to avoid polluting other tests.
         let prev_home = std::env::var("HOME").ok();
         let prev_th = std::env::var("TRADECTL_HOME").ok();
@@ -633,8 +626,8 @@ mod logging_tests {
         std::env::set_var("HOME", "/should-be-ignored");
         std::env::set_var("TRADECTL_HOME", "/tmp/tradectl-home-test");
 
-        let root = default_log_root();
-        assert_eq!(root, std::path::PathBuf::from("/tmp/tradectl-home-test/.tradectl/logs"));
+        let dir = resolve_log_dir(None, "mybot");
+        assert_eq!(dir, std::path::PathBuf::from("/tmp/tradectl-home-test/.tradectl/bot/mybot/logs"));
 
         // restore
         match prev_home { Some(v) => std::env::set_var("HOME", v), None => std::env::remove_var("HOME") }

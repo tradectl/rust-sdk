@@ -3,6 +3,7 @@ pub mod strategy;
 pub mod exchange;
 pub mod runner;
 pub mod logging;
+pub mod paths;
 pub mod bot_state;
 pub mod strat_id;
 pub mod reader;

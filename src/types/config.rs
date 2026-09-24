@@ -19,7 +19,7 @@ use super::enums::Side;
 pub struct BotConfig {
     /// Display label only. The bot's identity — settings persistence,
     /// pairing, telegram, reporting — is its run directory
-    /// (`~/.tradectl/run/<name>/`, CLI-derived); this field never moves any
+    /// (`~/.tradectl/bot/<name>/`, CLI-derived); this field never moves any
     /// path and is free to say anything (e.g. survive a config copied from
     /// another bot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,11 +825,8 @@ pub struct LimitsConfig {
     pub max_loss_limit: f64,
 }
 
-/// Deprecated. The trade database lives at a fixed path
-/// (`~/.tradectl/trades.db`) and this field is ignored at runtime.
-/// Retained as a struct so existing configs parse without error.
-///
-/// Will be removed in a future release once the migration window closes.
+/// Overrides where the trade database lives. Default: the bot's own
+/// `~/.tradectl/bot/<bot>/trades.db`.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DbConfig {
     pub path: String,
@@ -839,8 +836,8 @@ pub struct DbConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogConfig {
-    /// Optional base directory. Default: `~/.tradectl/logs`.
-    /// Files land at `<base>/<config_name>/<config_name>_YYYY-MM-DD.log`.
+    /// Optional base directory; files land at `<base>/<bot>/<bot>.YYYY-MM-DD.log`.
+    /// Default: the bot's own `~/.tradectl/bot/<bot>/logs/`.
     #[serde(default)]
     pub path: Option<String>,
 
