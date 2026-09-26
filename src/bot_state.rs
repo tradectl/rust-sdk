@@ -25,11 +25,27 @@ pub trait SessionStoreApi: Send + Sync {
     fn all(&self) -> HashMap<String, serde_json::Value>;
 }
 
-/// Strategy control API — pause/resume entries per symbol.
+/// Strategy control API — pause/resume entries per strategy instance and
+/// symbol.
+///
+/// Keyed by `(id, symbol)`, where `id` is the instance's stable [`StratId`]
+/// string. Several instances routinely trade one symbol, so a symbol-only
+/// pause stopped whichever instance happened to tick first. Callers that only
+/// know a symbol (Telegram `/resume SYM`, MCP) use the `*_symbol` methods,
+/// which act on EVERY instance on that symbol.
 pub trait StrategyControlApi: Send + Sync {
-    fn pause(&self, symbol: &str) -> bool;
-    fn resume(&self, symbol: &str) -> bool;
-    fn is_paused(&self, symbol: &str) -> bool;
+    /// Manual pause of one instance on one symbol. `true` if it changed state.
+    fn pause(&self, id: &str, symbol: &str) -> bool;
+    /// Lift the pause (manual or edge decay) of one instance on one symbol.
+    /// `true` if it changed state.
+    fn resume(&self, id: &str, symbol: &str) -> bool;
+    fn is_paused(&self, id: &str, symbol: &str) -> bool;
+    /// This instance's paused symbols, sorted.
+    fn paused_symbols(&self, id: &str) -> Vec<String>;
+    /// Lift the pause of every instance on `symbol`. Returns the ids resumed.
+    fn resume_symbol(&self, symbol: &str) -> Vec<String>;
+    /// True when any instance has `symbol` paused.
+    fn is_symbol_paused(&self, symbol: &str) -> bool;
 }
 
 /// Ring buffer capacity for recent fills.
