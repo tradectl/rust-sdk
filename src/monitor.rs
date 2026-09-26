@@ -170,6 +170,11 @@ pub struct RunStateFrame {
 }
 
 /// Why a running instance is holding its entries.
+///
+/// One reason per frame, by precedence `bot_halt` > `pairs_halted` >
+/// `paused`. A pause under a halt is not lost: `GET /v1/config`
+/// `paused_symbols` always lists every pause, and a frame with the pause
+/// follows when the halt lifts.
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 pub struct HoldFrame {
     /// `"bot_halt"` (the whole bot: max-loss cap, account-fatal error,
