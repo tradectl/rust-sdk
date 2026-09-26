@@ -183,7 +183,9 @@ pub struct HoldFrame {
     /// its pairs stopped on exchange errors while others still trade).
     pub kind: String,
     pub reason: String,
-    /// The symbols held: the paused or halted pairs. Empty for `bot_halt`.
+    /// The symbols held: the paused or halted pairs. Empty for `bot_halt`,
+    /// and for a whole-strategy pause while the strategy has no pair yet
+    /// (`kind == "paused"` then means the whole strategy).
     pub symbols: Vec<String>,
     /// Epoch ms the hold began.
     pub since_ms: u64,
