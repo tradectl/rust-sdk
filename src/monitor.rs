@@ -18,6 +18,11 @@ pub struct MonitorTick {
     /// guessing from the symbol shape (BNBUSDT is valid on spot *and* linear).
     pub market: String,
     pub symbol: String,
+    /// Stable id of the strategy instance (matches `StrategyConfigDto::id`).
+    /// `strategy_name` is not unique, so this is what tells same-named
+    /// instances apart. Absent from older bots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
     pub bid_price: f64,
     pub ask_price: f64,
     pub balance: f64,
@@ -34,6 +39,9 @@ pub struct MonitorFill {
     pub timestamp_ms: u64,
     pub strategy_name: String,
     pub symbol: String,
+    /// Stable id of the strategy instance — see [`MonitorTick::strategy_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
     pub side: String,
     pub price: f64,
     pub quantity: f64,
@@ -138,18 +146,49 @@ pub struct ConfigApplied {
 }
 
 /// A strategy instance's live run-state transition, pushed the instant the
-/// runner records it (`ConfigAdmin::set_run_state` / `fail_if_running`) so the
+/// runner records it (`ConfigAdmin::set_run_state` / `fail_if_running`, and on
+/// every hold change) so the
 /// Lab's strategy editor repaints its status the moment it changes, instead of
 /// waiting for the next `GET /v1/config` poll. `id` is the stable strategy id
 /// (matches `StrategyConfigDto::id`); `run_state` is the same lower-case wire
 /// string as the config DTO (`starting` / `running` / `stopped` / `failed`),
 /// and `start_error` carries the reason when `run_state == "failed"`.
+///
+/// `hold` says the instance is running but not opening anything new, and why.
+/// It is a separate field, not a `run_state` string: the instance still
+/// manages its positions, and a Lab that does not know the field keeps
+/// showing what it showed before. Absent when nothing holds the instance, so
+/// a frame without it clears a hold the previous frame carried.
 #[derive(serde::Serialize, Clone)]
 pub struct RunStateFrame {
     pub id: String,
     pub run_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<HoldFrame>,
+}
+
+/// Why a running instance is holding its entries.
+///
+/// One reason per frame, by precedence `bot_halt` > `pairs_halted` >
+/// `paused`. A pause under a halt is not lost: `GET /v1/config`
+/// `paused_symbols` always lists every pause, and a frame with the pause
+/// follows when the halt lifts.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+pub struct HoldFrame {
+    /// `"bot_halt"` (the whole bot: max-loss cap, account-fatal error,
+    /// Telegram `/stop`, resource or disk guard), `"paused"` (a manual or
+    /// edge-decay pause of some of its symbols) or `"pairs_halted"` (some of
+    /// its pairs stopped on exchange errors while others still trade).
+    pub kind: String,
+    pub reason: String,
+    /// The symbols held: the paused or halted pairs. Empty for `bot_halt`,
+    /// and for a whole-strategy pause while the strategy has no pair yet
+    /// (`kind == "paused"` then means the whole strategy).
+    pub symbols: Vec<String>,
+    /// Epoch ms the hold began.
+    pub since_ms: u64,
 }
 
 /// Tagged event envelope for JSON serialization.
@@ -209,5 +248,64 @@ impl MonitorBroadcaster {
         if let Ok(json) = serde_json::to_string(event) {
             let _ = self.tx.send(json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fill(strategy_id: Option<String>) -> MonitorFill {
+        MonitorFill {
+            timestamp_ms: 1,
+            strategy_name: "shot".into(),
+            symbol: "BTCUSDT".into(),
+            strategy_id,
+            side: "BUY".into(),
+            price: 1.0,
+            quantity: 1.0,
+            fill_type: "entry".into(),
+            profit_pct: None,
+            profit_usd: None,
+            exit_id: None,
+            is_partial: false,
+            position_closed: false,
+        }
+    }
+
+    /// An older Lab decodes these frames with no `strategy_id` field, so the
+    /// key is left out rather than sent as `null` when there is no id.
+    #[test]
+    fn strategy_id_is_sent_only_when_known() {
+        let v = serde_json::to_value(MonitorEvent::Fill(fill(Some("st_a".into())))).unwrap();
+        assert_eq!(v["strategy_id"], "st_a");
+        let v = serde_json::to_value(MonitorEvent::Fill(fill(None))).unwrap();
+        assert!(v.get("strategy_id").is_none());
+    }
+
+    /// A frame with no `hold` is how a hold is cleared, so the key must be
+    /// absent then, and carry every field when set.
+    #[test]
+    fn run_state_frame_carries_the_hold_only_when_held() {
+        let mut f = RunStateFrame {
+            id: "st_a".into(),
+            run_state: "running".into(),
+            start_error: None,
+            hold: None,
+        };
+        let v = serde_json::to_value(MonitorEvent::RunState(f.clone())).unwrap();
+        assert_eq!(v["type"], "RunState");
+        assert!(v.get("hold").is_none());
+        f.hold = Some(HoldFrame {
+            kind: "paused".into(),
+            reason: "paused from the Lab".into(),
+            symbols: vec!["BTCUSDT".into()],
+            since_ms: 42,
+        });
+        let v = serde_json::to_value(MonitorEvent::RunState(f)).unwrap();
+        assert_eq!(v["run_state"], "running");
+        assert_eq!(v["hold"]["kind"], "paused");
+        assert_eq!(v["hold"]["symbols"][0], "BTCUSDT");
+        assert_eq!(v["hold"]["since_ms"], 42);
     }
 }

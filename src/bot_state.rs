@@ -25,11 +25,62 @@ pub trait SessionStoreApi: Send + Sync {
     fn all(&self) -> HashMap<String, serde_json::Value>;
 }
 
-/// Strategy control API — pause/resume entries per symbol.
+/// Strategy control API — pause/resume entries per strategy instance and
+/// symbol.
+///
+/// Keyed by `(id, symbol)`, where `id` is the instance's stable [`StratId`]
+/// string. Several instances routinely trade one symbol, so a symbol-only
+/// pause stopped whichever instance happened to tick first.
+///
+/// Callers that only know a symbol (Telegram `/resume SYM`, MCP, the AI
+/// agent) may lift **edge-decay** pauses only. A manual pause is an
+/// operator's decision about one instance, and only a call naming that
+/// instance's id lifts it.
 pub trait StrategyControlApi: Send + Sync {
-    fn pause(&self, symbol: &str) -> bool;
-    fn resume(&self, symbol: &str) -> bool;
-    fn is_paused(&self, symbol: &str) -> bool;
+    /// Manual pause of one instance on one symbol. `true` if it changed state.
+    fn pause(&self, id: &str, symbol: &str) -> bool;
+    /// Lift the pause (manual or edge decay) of one instance on one symbol.
+    /// `true` if it changed state.
+    fn resume(&self, id: &str, symbol: &str) -> bool;
+    fn is_paused(&self, id: &str, symbol: &str) -> bool;
+    /// This instance's paused symbols, sorted.
+    fn paused_symbols(&self, id: &str) -> Vec<String>;
+    /// Lift the edge-decay pause of every instance on `symbol`, leaving
+    /// manual pauses alone. Returns the ids resumed, sorted.
+    fn resume_edge_decay(&self, symbol: &str) -> Vec<String>;
+    /// Ids of the instances holding a manual pause on `symbol`, sorted — what
+    /// a symbol-only resume left in place, for its reply.
+    fn manual_pauses(&self, symbol: &str) -> Vec<String>;
+}
+
+/// A symbol-only resume (MCP, the AI agent) and its reply: lifts edge decay
+/// on `symbol`, names the instances it lifted, and any manual pause it left.
+///
+/// An instance whose edge decay was lifted but which is still paused manually
+/// is named once, as still paused — not as resumed.
+pub fn symbol_resume_reply(ctrl: &dyn StrategyControlApi, symbol: &str) -> String {
+    let ids = ctrl.resume_edge_decay(symbol);
+    let manual = ctrl.manual_pauses(symbol);
+    let (still, trading): (Vec<String>, Vec<String>) =
+        ids.iter().cloned().partition(|id| manual.contains(id));
+    let others: Vec<String> = manual.iter().filter(|id| !ids.contains(id)).cloned().collect();
+    let mut parts = Vec::new();
+    if ids.is_empty() {
+        parts.push(format!("{symbol} had no edge-decay pause."));
+    }
+    if !trading.is_empty() {
+        parts.push(format!("{symbol}: edge-decay pause lifted for {}.", trading.join(", ")));
+    }
+    if !still.is_empty() {
+        parts.push(format!("Edge decay lifted, still paused manually: {}.", still.join(", ")));
+    }
+    if !others.is_empty() {
+        parts.push(format!(
+            "Still paused manually (resume in the Lab, by strategy id): {}.",
+            others.join(", "),
+        ));
+    }
+    parts.join(" ")
 }
 
 /// Ring buffer capacity for recent fills.
@@ -869,5 +920,62 @@ mod position_tests {
         let xan = comparisons.iter().find(|c| c.symbol == "XANUSDT").expect("XANUSDT missing");
         assert!(xan.has_position);
         assert!((xan.unrealized_pnl - 0.5).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod resume_reply_tests {
+    use super::*;
+
+    /// Edge decay on st_a, a manual pause on st_b, both on BTCUSDT.
+    struct Fake;
+    impl StrategyControlApi for Fake {
+        fn pause(&self, _: &str, _: &str) -> bool { false }
+        fn resume(&self, _: &str, _: &str) -> bool { false }
+        fn is_paused(&self, _: &str, _: &str) -> bool { false }
+        fn paused_symbols(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn resume_edge_decay(&self, s: &str) -> Vec<String> {
+            if s == "BTCUSDT" { vec!["st_a".into()] } else { Vec::new() }
+        }
+        fn manual_pauses(&self, s: &str) -> Vec<String> {
+            if s == "BTCUSDT" { vec!["st_b".into()] } else { Vec::new() }
+        }
+    }
+
+    /// The reply names what it lifted and what it left, by id.
+    #[test]
+    fn the_reply_names_the_lifted_and_the_manual_pauses() {
+        let r = symbol_resume_reply(&Fake, "BTCUSDT");
+        assert!(r.contains("lifted for st_a"), "{r}");
+        assert!(r.contains("Still paused manually") && r.contains("st_b"), "{r}");
+        assert_eq!(symbol_resume_reply(&Fake, "ETHUSDT"), "ETHUSDT had no edge-decay pause.");
+    }
+}
+
+#[cfg(test)]
+mod resume_reply_overlap_tests {
+    use super::*;
+
+    /// st_a had edge decay under a manual pause: lifted, but still paused.
+    struct Overlap;
+    impl StrategyControlApi for Overlap {
+        fn pause(&self, _: &str, _: &str) -> bool { false }
+        fn resume(&self, _: &str, _: &str) -> bool { false }
+        fn is_paused(&self, _: &str, _: &str) -> bool { false }
+        fn paused_symbols(&self, _: &str) -> Vec<String> { Vec::new() }
+        fn resume_edge_decay(&self, _: &str) -> Vec<String> { vec!["st_a".into(), "st_c".into()] }
+        fn manual_pauses(&self, _: &str) -> Vec<String> { vec!["st_a".into(), "st_b".into()] }
+    }
+
+    /// An id is named once: never as both resumed and still paused.
+    #[test]
+    fn an_id_still_paused_manually_is_not_reported_as_resumed() {
+        let r = symbol_resume_reply(&Overlap, "BTCUSDT");
+        assert_eq!(
+            r,
+            "BTCUSDT: edge-decay pause lifted for st_c. \
+             Edge decay lifted, still paused manually: st_a. \
+             Still paused manually (resume in the Lab, by strategy id): st_b.",
+        );
     }
 }
