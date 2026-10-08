@@ -7,6 +7,7 @@ pub mod paths;
 pub mod bot_state;
 pub mod strat_id;
 pub mod reader;
+pub mod license;
 #[cfg(feature = "monitor")]
 pub mod monitor;
 #[cfg(feature = "runner")]
