@@ -24,10 +24,11 @@ pub struct BotConfig {
     /// another bot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Platform trade-reporting key (`strategyKey` in the trades API).
-    /// Defaults to the bot name. Set this when trades must report under a
-    /// platform-registered strategy whose name differs from the bot's
-    /// (e.g. a bot dir `bncm` reporting as the registered strategy `shot`).
+    /// The batch-level `strategyKey` in the trades API. Defaults to the bot
+    /// name. Each trade also carries its plugin's name (`shot`), and the
+    /// platform keeps statistics under that. Set this only to link trades to
+    /// a strategy you registered under another key (e.g. `my-shot`): the
+    /// platform links a trade to it when you own it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_key: Option<String>,
     pub telegram: Option<TelegramConfig>,
