@@ -258,13 +258,17 @@ pub struct StatsSummary {
     pub wins: usize,
     pub losses: usize,
     pub win_rate: f64,
-    /// Funding the account paid (negative) or received over the window, in
-    /// USD. Not part of `net_pnl_usd`, the trade count or the win rate.
-    /// `None` when nothing is on record (paper, a venue the bot cannot read
-    /// funding from, a `side` filter) and on an older bot.
+    /// Funding the ACCOUNT paid (negative) or received over the window, in
+    /// USD: every payment on the key, so also positions of other bots and
+    /// manual trades on it. Bots on one key report the same figure; count it
+    /// once per account. Not part of `net_pnl_usd`, the trade count or the win
+    /// rate. `None` when nothing in USD is on record (paper, a venue the bot
+    /// cannot read funding from, coin-only funding, a `side` filter) and on an
+    /// older bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub funding_usd: Option<f64>,
-    /// `net_pnl_usd + funding_usd`: the figure to compare with the exchange.
+    /// `net_pnl_usd + funding_usd`: this bot's trades plus the account's
+    /// funding. Matches the exchange when this bot is all that trades the key.
     /// `None` exactly when `funding_usd` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_usd: Option<f64>,
@@ -290,8 +294,8 @@ pub struct CoinStat {
     pub wins: usize,
 }
 
-/// Funding for one UTC day within a stats window. Separate from [`DailyStat`]:
-/// a day can carry funding and no trade.
+/// The account's funding for one UTC day within a stats window. Separate from
+/// [`DailyStat`]: a day can carry funding and no trade.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyFunding {
     /// `YYYY-MM-DD` (UTC).
