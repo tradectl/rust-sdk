@@ -1298,7 +1298,7 @@ mod tests {
             "SL": 0.5,
             "stopLoss": -0.5,
             "orderSize": 1.433,
-            "enablePriceReducer": true
+            "extraFlag": true
         }"#;
         let entry: StratEntry = serde_json::from_str(json).unwrap();
 
@@ -1308,7 +1308,24 @@ mod tests {
         assert_eq!(entry.direction, Side::Long); // default
         assert_eq!(entry.get_f64("SL"), Some(0.5));
         assert_eq!(entry.get_f64_or("stopLoss", 0.0), -0.5);
-        assert_eq!(entry.get_bool("enablePriceReducer"), Some(true));
+        assert_eq!(entry.get_bool("extraFlag"), Some(true));
+    }
+
+    #[test]
+    fn retired_reducer_keys_still_load() {
+        let json = r#"{
+            "name": "old",
+            "type": "Shot",
+            "marketType": "LINEAR",
+            "pairs": ["BTCUSDT"],
+            "enablePriceReducer": true,
+            "tpReducerStartDelay": 0.1,
+            "tpReducerStepDelay": 0.3,
+            "tpReducerWorkInterval": 1,
+            "tpReducerFinishPrice": 0.2
+        }"#;
+        let entry: StratEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.name, "old");
     }
 
     #[test]
