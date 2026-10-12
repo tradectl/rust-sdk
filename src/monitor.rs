@@ -295,11 +295,33 @@ impl MonitorBroadcaster {
         self.broadcast(&MonitorEvent::Orders(orders));
     }
 
-    /// The task ended: drop it from the snapshot. Nothing is sent: real
-    /// exits outlive a stopped strategy's task, and the Lab keeps showing
-    /// them as stopped until its rows expire.
-    pub fn clear_orders(&self, slot: u64) {
-        self.orders.lock().unwrap_or_else(|e| e.into_inner()).remove(&slot);
+    /// The task ended: drop it from the snapshot and send an empty `Orders`
+    /// frame for it, so clients remove its rows at once. If another task
+    /// reports the same strategy and symbol (a respawned one), its rows are
+    /// sent instead. No-op if the task held nothing.
+    pub fn clear_orders(&self, slot: u64, timestamp_ms: u64) {
+        let frame = {
+            let mut map = self.orders.lock().unwrap_or_else(|e| e.into_inner());
+            map.remove(&slot).map(|mut last| {
+                let same = |o: &&TaskOrders| {
+                    o.strategy_name == last.strategy_name
+                        && o.symbol == last.symbol
+                        && o.strategy_id == last.strategy_id
+                };
+                match map.values().find(same) {
+                    Some(live) => live.clone(),
+                    None => {
+                        last.timestamp_ms = timestamp_ms;
+                        last.orders.clear();
+                        last.positions.clear();
+                        last
+                    }
+                }
+            })
+        };
+        if let Some(frame) = frame {
+            self.broadcast(&MonitorEvent::Orders(frame));
+        }
     }
 
     /// Every task's latest orders and position, as an `OrdersSnapshot`
@@ -412,14 +434,14 @@ mod tests {
 
         m.publish_orders(b, task("ETHUSDT", 0));
         assert_eq!(snapshot_tasks(&m).len(), 1, "an empty book leaves the snapshot");
-        m.clear_orders(a);
+        m.clear_orders(a, 2);
         assert!(snapshot_tasks(&m).is_empty(), "an ended task leaves the snapshot");
     }
 
-    /// A client sees every change as an `Orders` frame. An ended task only
-    /// leaves the snapshot.
+    /// A client sees every change as an `Orders` frame, and an ended task as
+    /// an empty one.
     #[test]
-    fn changes_are_sent_as_orders_frames() {
+    fn changes_and_ends_are_sent_as_orders_frames() {
         let m = MonitorBroadcaster::new();
         let mut rx = m.subscribe();
         let slot = m.orders_slot();
@@ -433,9 +455,30 @@ mod tests {
         assert!(v["orders"].as_array().unwrap().is_empty(), "an emptied book is sent");
         m.publish_orders(slot, task("BTCUSDT", 1));
         let _ = rx.try_recv().unwrap();
-        m.clear_orders(slot);
-        assert!(rx.try_recv().is_err(), "an ended task sends nothing");
+        m.clear_orders(slot, 7);
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(v["type"], "Orders");
+        assert_eq!(v["strategy_id"], "st_a", "same key, so the client finds the rows");
+        assert_eq!(v["timestamp_ms"], 7);
+        assert!(v["orders"].as_array().unwrap().is_empty() && v["positions"].as_array().unwrap().is_empty());
         assert!(snapshot_tasks(&m).is_empty());
+        m.clear_orders(slot, 8);
+        assert!(rx.try_recv().is_err(), "a task that held nothing sends nothing");
+    }
+
+    /// A respawned task already reports the same strategy and symbol: the old
+    /// one ending must not wipe its rows.
+    #[test]
+    fn an_ended_task_does_not_wipe_its_successor() {
+        let m = MonitorBroadcaster::new();
+        let (old, new) = (m.orders_slot(), m.orders_slot());
+        m.publish_orders(old, task("BTCUSDT", 1));
+        m.publish_orders(new, task("BTCUSDT", 2));
+        let mut rx = m.subscribe();
+        m.clear_orders(old, 9);
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(v["orders"].as_array().unwrap().len(), 2, "the successor's rows are sent");
+        assert_eq!(snapshot_tasks(&m).len(), 1);
     }
 
     /// A frame with no `hold` is how a hold is cleared, so the key must be
