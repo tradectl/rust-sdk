@@ -191,6 +191,40 @@ pub struct HoldFrame {
     pub since_ms: u64,
 }
 
+/// One symbol task's resting orders and open position: the `orders` and
+/// `positions` a Tick carries in `strategy_state`, without the market data
+/// and the strategy's own state. Sent as an `Orders` frame when they change,
+/// and as part of an `OrdersSnapshot`. Empty `orders` and `positions` mean
+/// the task holds nothing now.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+pub struct TaskOrders {
+    pub timestamp_ms: u64,
+    pub strategy_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    pub mode: String,
+    pub market: String,
+    pub symbol: String,
+    /// Strategy plugin type, as `strategy_state.strat_type` in a Tick.
+    pub strat_type: String,
+    pub orders: Vec<serde_json::Value>,
+    pub positions: Vec<serde_json::Value>,
+}
+
+impl TaskOrders {
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty() && self.positions.is_empty()
+    }
+}
+
+/// Every task's [`TaskOrders`] that holds anything. Complete: a series not
+/// listed holds no orders and no position.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct OrdersSnapshot {
+    pub timestamp_ms: u64,
+    pub tasks: Vec<TaskOrders>,
+}
+
 /// Tagged event envelope for JSON serialization.
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
@@ -200,6 +234,8 @@ pub enum MonitorEvent {
     Shadow(ShadowSummary),
     Config(ConfigApplied),
     RunState(RunStateFrame),
+    Orders(TaskOrders),
+    OrdersSnapshot(OrdersSnapshot),
 }
 
 /// Fans monitor events out to subscribers over a `tokio::broadcast` channel.
@@ -211,6 +247,10 @@ pub enum MonitorEvent {
 /// [`broadcast`](Self::broadcast) becomes a no-op (no subscribers).
 pub struct MonitorBroadcaster {
     tx: broadcast::Sender<String>,
+    /// Latest [`TaskOrders`] per task slot, for tasks holding anything. Read
+    /// by [`orders_snapshot`](Self::orders_snapshot).
+    orders: std::sync::Mutex<std::collections::HashMap<u64, TaskOrders>>,
+    next_slot: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MonitorBroadcaster {
@@ -219,13 +259,63 @@ impl Default for MonitorBroadcaster {
     }
 }
 
+/// Fan-out channel depth. Shared by every task's frames; a client that falls
+/// further behind gets an `OrdersSnapshot` after the lag.
+pub const MONITOR_CHANNEL_CAPACITY: usize = 1024;
+
 impl MonitorBroadcaster {
-    /// Create a broadcaster backed by a bounded (64) fan-out channel. No
+    /// Create a broadcaster backed by a bounded fan-out channel. No
     /// socket is bound; consumers obtain receivers via
     /// [`subscribe`](Self::subscribe).
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel::<String>(64);
-        Self { tx }
+        let (tx, _) = broadcast::channel::<String>(MONITOR_CHANNEL_CAPACITY);
+        Self {
+            tx,
+            orders: Default::default(),
+            next_slot: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// A key for one task's orders, unique for this broadcaster.
+    pub fn orders_slot(&self) -> u64 {
+        self.next_slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record a task's current orders and position, and send them as an
+    /// `Orders` frame. An empty one removes the task from the snapshot.
+    pub fn publish_orders(&self, slot: u64, orders: TaskOrders) {
+        {
+            let mut map = self.orders.lock().unwrap_or_else(|e| e.into_inner());
+            if orders.is_empty() {
+                map.remove(&slot);
+            } else {
+                map.insert(slot, orders.clone());
+            }
+        }
+        self.broadcast(&MonitorEvent::Orders(orders));
+    }
+
+    /// The task ended: drop it from the snapshot. Nothing is sent: real
+    /// exits outlive a stopped strategy's task, and the Lab keeps showing
+    /// them as stopped until its rows expire.
+    pub fn clear_orders(&self, slot: u64) {
+        self.orders.lock().unwrap_or_else(|e| e.into_inner()).remove(&slot);
+    }
+
+    /// Every task's latest orders and position, as an `OrdersSnapshot`
+    /// frame. Subscribe first, then send this: a change made in between
+    /// reaches the client twice rather than not at all.
+    pub fn orders_snapshot(&self, timestamp_ms: u64) -> String {
+        let mut tasks: Vec<TaskOrders> = self
+            .orders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        tasks.sort_by(|a, b| (&a.strategy_name, &a.symbol).cmp(&(&b.strategy_name, &b.symbol)));
+        let event = MonitorEvent::OrdersSnapshot(OrdersSnapshot { timestamp_ms, tasks });
+        serde_json::to_string(&event).unwrap_or_default()
     }
 
     /// Subscribe a new receiver. Each connected `/v1/stream` client holds one;
@@ -281,6 +371,71 @@ mod tests {
         assert_eq!(v["strategy_id"], "st_a");
         let v = serde_json::to_value(MonitorEvent::Fill(fill(None))).unwrap();
         assert!(v.get("strategy_id").is_none());
+    }
+
+    fn task(symbol: &str, orders: usize) -> TaskOrders {
+        TaskOrders {
+            timestamp_ms: 1,
+            strategy_name: "shot".into(),
+            strategy_id: Some("st_a".into()),
+            mode: "paper".into(),
+            market: "linear".into(),
+            symbol: symbol.into(),
+            strat_type: "shot".into(),
+            orders: (0..orders).map(|i| serde_json::json!({ "id": format!("o{i}") })).collect(),
+            positions: Vec::new(),
+        }
+    }
+
+    fn snapshot_tasks(m: &MonitorBroadcaster) -> Vec<serde_json::Value> {
+        let v: serde_json::Value = serde_json::from_str(&m.orders_snapshot(9)).unwrap();
+        assert_eq!(v["type"], "OrdersSnapshot");
+        assert_eq!(v["timestamp_ms"], 9);
+        v["tasks"].as_array().unwrap().clone()
+    }
+
+    /// The snapshot holds each task's latest orders, and only tasks that hold
+    /// something. It is kept with no client connected.
+    #[test]
+    fn the_snapshot_keeps_each_tasks_latest_orders() {
+        let m = MonitorBroadcaster::new();
+        let (a, b) = (m.orders_slot(), m.orders_slot());
+        assert_ne!(a, b);
+        m.publish_orders(a, task("BTCUSDT", 1));
+        m.publish_orders(b, task("ETHUSDT", 2));
+        m.publish_orders(a, task("BTCUSDT", 3));
+        let tasks = snapshot_tasks(&m);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0]["symbol"], "BTCUSDT");
+        assert_eq!(tasks[0]["orders"].as_array().unwrap().len(), 3);
+        assert_eq!(tasks[1]["orders"].as_array().unwrap().len(), 2);
+
+        m.publish_orders(b, task("ETHUSDT", 0));
+        assert_eq!(snapshot_tasks(&m).len(), 1, "an empty book leaves the snapshot");
+        m.clear_orders(a);
+        assert!(snapshot_tasks(&m).is_empty(), "an ended task leaves the snapshot");
+    }
+
+    /// A client sees every change as an `Orders` frame. An ended task only
+    /// leaves the snapshot.
+    #[test]
+    fn changes_are_sent_as_orders_frames() {
+        let m = MonitorBroadcaster::new();
+        let mut rx = m.subscribe();
+        let slot = m.orders_slot();
+        m.publish_orders(slot, task("BTCUSDT", 1));
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(v["type"], "Orders");
+        assert_eq!(v["strategy_id"], "st_a");
+        assert_eq!(v["orders"][0]["id"], "o0");
+        m.publish_orders(slot, task("BTCUSDT", 0));
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(v["orders"].as_array().unwrap().is_empty(), "an emptied book is sent");
+        m.publish_orders(slot, task("BTCUSDT", 1));
+        let _ = rx.try_recv().unwrap();
+        m.clear_orders(slot);
+        assert!(rx.try_recv().is_err(), "an ended task sends nothing");
+        assert!(snapshot_tasks(&m).is_empty());
     }
 
     /// A frame with no `hold` is how a hold is cleared, so the key must be
