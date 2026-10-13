@@ -18,8 +18,9 @@ pub use types::*;
 pub use strat_id::{StratId, StratIdent};
 pub use strategy::*;
 pub use reader::{
-    CloseReason, CoinStat, DailyStat, PositionReader, StatsReader, StatsResponse, StatsSummary,
-    StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader, TradeReaderError, TradeRow,
+    CloseReason, CoinStat, DailyFunding, DailyStat, PositionReader, StatsReader, StatsResponse,
+    StatsSummary, StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader, TradeReaderError,
+    TradeRow,
 };
 
 /// Entry point for self-contained strategy binaries.

@@ -258,6 +258,20 @@ pub struct StatsSummary {
     pub wins: usize,
     pub losses: usize,
     pub win_rate: f64,
+    /// Funding the ACCOUNT paid (negative) or received over the window, in
+    /// USD: every payment on the key, so also positions of other bots and
+    /// manual trades on it. Bots on one key report the same figure; count it
+    /// once per account. Not part of `net_pnl_usd`, the trade count or the win
+    /// rate. `None` when nothing in USD is on record (paper, a venue the bot
+    /// cannot read funding from, coin-only funding, a `side` filter) and on an
+    /// older bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding_usd: Option<f64>,
+    /// `net_pnl_usd + funding_usd`: this bot's trades plus the account's
+    /// funding. Matches the exchange when this bot is all that trades the key.
+    /// `None` exactly when `funding_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_usd: Option<f64>,
 }
 
 /// One day's aggregated P&L within a stats window.
@@ -280,6 +294,15 @@ pub struct CoinStat {
     pub wins: usize,
 }
 
+/// The account's funding for one UTC day within a stats window. Separate from
+/// [`DailyStat`]: a day can carry funding and no trade.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyFunding {
+    /// `YYYY-MM-DD` (UTC).
+    pub date: String,
+    pub usd: f64,
+}
+
 /// Server-side, time-windowed trade statistics. The body of `GET /v1/stats`.
 /// Computed entirely in SQLite by the concrete backend — no row pulling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +310,10 @@ pub struct StatsResponse {
     pub summary: StatsSummary,
     pub daily: Vec<DailyStat>,
     pub by_coin: Vec<CoinStat>,
+    /// Funding by UTC day, only days with funding on record. Empty under the
+    /// same conditions [`StatsSummary::funding_usd`] is `None`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daily_funding: Vec<DailyFunding>,
 }
 
 impl Default for StatsResponse {
@@ -298,9 +325,12 @@ impl Default for StatsResponse {
                 wins: 0,
                 losses: 0,
                 win_rate: 0.0,
+                funding_usd: None,
+                net_usd: None,
             },
             daily: Vec::new(),
             by_coin: Vec::new(),
+            daily_funding: Vec::new(),
         }
     }
 }
@@ -379,5 +409,29 @@ mod tests {
         assert_eq!(back.rows[0].id, 7);
         assert_eq!(back.next_cursor.as_deref(), Some("2:7"));
         assert_eq!(back.total, 1);
+    }
+
+    // Funding fields are optional both ways: an older bot's body (no fields)
+    // still decodes, and a body without funding sends no fields to an older Lab.
+    #[test]
+    fn stats_summary_funding_fields_are_optional_on_the_wire() {
+        let old = r#"{"trade_count":2,"net_pnl_usd":3.5,"wins":1,"losses":1,"win_rate":50.0}"#;
+        let s: StatsSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(s.funding_usd, None);
+        assert_eq!(s.net_usd, None);
+        assert!(!serde_json::to_string(&s).unwrap().contains("funding_usd"));
+
+        let with = StatsSummary { funding_usd: Some(-1.25), net_usd: Some(2.25), ..s };
+        let back: StatsSummary =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.funding_usd, Some(-1.25));
+        assert_eq!(back.net_usd, Some(2.25));
+
+        let r: StatsResponse = serde_json::from_str(&format!(
+            r#"{{"summary":{old},"daily":[],"by_coin":[]}}"#
+        ))
+        .unwrap();
+        assert!(r.daily_funding.is_empty());
+        assert!(!serde_json::to_string(&r).unwrap().contains("daily_funding"));
     }
 }
