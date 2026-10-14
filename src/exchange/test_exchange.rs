@@ -539,6 +539,8 @@ impl MarketAdapter for TestExchange {
 
 
     fn on_depth(&self, _symbol: &str, _levels: usize, _cb: DepthCallback) -> CallbackId { 0 }
+    fn on_record_depth(&self, _: &str, _: usize, _: DepthCallback) -> CallbackId { 0 }
+    fn off_record_depth(&self, _: &str, _: CallbackId) {}
     fn off_depth(&self, _symbol: &str, _id: CallbackId) {}
     fn get_depth(&self, _symbol: &str) -> Option<OrderBookDepth> { None }
 
