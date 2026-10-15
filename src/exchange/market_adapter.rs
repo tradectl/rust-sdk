@@ -138,6 +138,11 @@ pub trait MarketAdapter: Send + Sync {
     /// depth (adapter picks closest supported: e.g. Binance 5/10/20).
     /// Venues without a depth feed return `0` and never invoke `cb`.
     fn on_depth(&self, symbol: &str, levels: usize, cb: DepthCallback) -> CallbackId;
+    /// Depth for the trade recorder, on its own subscription: what
+    /// `on_depth` callers get is unchanged by it. Venues without a recorder
+    /// depth path return `0` and never invoke `cb`.
+    fn on_record_depth(&self, symbol: &str, levels: usize, cb: DepthCallback) -> CallbackId;
+    fn off_record_depth(&self, symbol: &str, id: CallbackId);
     fn off_depth(&self, symbol: &str, id: CallbackId);
     /// Get the latest cached depth snapshot. Returns None if not subscribed.
     fn get_depth(&self, symbol: &str) -> Option<OrderBookDepth>;

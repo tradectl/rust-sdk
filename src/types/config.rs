@@ -70,9 +70,45 @@ pub struct BotConfig {
     /// `engine/RESOURCE-GUARD-SPEC.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceConfig>,
+    /// Market data kept on disk around each trade (`docs/trade-recording.md`).
+    /// Absent means [`RecordingConfig::default`]: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
+}
+
+/// The `recording` block. Every key is optional; restart-tier.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RecordingConfig {
+    #[serde(default = "RecordingConfig::default_enabled")]
+    pub enabled: bool,
+    /// Depth levels inside a window: 20, 10, 5, or 0 for none.
+    #[serde(default = "RecordingConfig::default_depth")]
+    pub depth: u32,
+    #[serde(default = "RecordingConfig::default_retention_days", alias = "retentionDays")]
+    pub retention_days: u32,
+    #[serde(default = "RecordingConfig::default_max_mb", alias = "maxMb")]
+    pub max_mb: u64,
+}
+
+impl RecordingConfig {
+    fn default_enabled() -> bool { true }
+    fn default_depth() -> u32 { 20 }
+    fn default_retention_days() -> u32 { 365 }
+    fn default_max_mb() -> u64 { 8192 }
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            depth: Self::default_depth(),
+            retention_days: Self::default_retention_days(),
+            max_mb: Self::default_max_mb(),
+        }
+    }
 }
 
 /// How far the host-resource guard may go.
@@ -2302,6 +2338,21 @@ mod leverage_tests {
             c.strats.push(e);
         }
         c
+    }
+
+    #[test]
+    fn recording_block_defaults_on_and_reads_partial_documents() {
+        let c: BotConfig = serde_json::from_value(serde_json::json!({ "strats": [] })).unwrap();
+        assert!(c.recording.is_none());
+        let r = c.recording.unwrap_or_default();
+        assert_eq!((r.enabled, r.depth, r.retention_days, r.max_mb), (true, 20, 365, 8192));
+
+        let c: BotConfig = serde_json::from_value(serde_json::json!({
+            "strats": [], "recording": { "depth": 0, "retention_days": 30 }
+        }))
+        .unwrap();
+        let r = c.recording.unwrap();
+        assert_eq!((r.enabled, r.depth, r.retention_days, r.max_mb), (true, 0, 30, 8192));
     }
 
     #[test]

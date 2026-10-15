@@ -191,6 +191,11 @@ impl OrderTracker {
         max != 0 && self.entry_count() >= max
     }
 
+    /// Whether any entry is tracked for `symbol`. Allocates nothing.
+    pub fn has_entry_for_symbol(&self, symbol: &str) -> bool {
+        self.orders.get(symbol).is_some_and(|sm| sm.keys().any(|cid| self.entry_metadata.contains_key(cid)))
+    }
+
     /// All cids currently tracked as entries for a given symbol (regardless of slot).
     pub fn entry_cids_for_symbol(&self, symbol: &str) -> Vec<String> {
         self.entry_metadata.keys()
@@ -525,6 +530,14 @@ mod tests {
         assert_eq!(got, vec!["CA".to_string(), "CB".to_string()]);
 
         assert_eq!(tracker.entry_cids_for_symbol("SOLUSDT"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn has_entry_for_symbol_agrees_with_the_cid_list() {
+        let mut tracker = OrderTracker::new();
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), EntryMetadata::default());
+        assert!(tracker.has_entry_for_symbol("BTCUSDT"));
+        assert!(!tracker.has_entry_for_symbol("ETHUSDT"));
     }
 
     #[test]
