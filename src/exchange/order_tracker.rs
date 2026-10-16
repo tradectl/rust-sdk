@@ -178,12 +178,9 @@ impl OrderTracker {
     /// Find the cid of an entry by (symbol, slot). Returns `None` if no entry
     /// is currently tracked for that slot.
     pub fn entry_cid_for_slot(&self, symbol: &str, slot: &str) -> Option<String> {
-        self.entry_metadata.iter()
-            .find(|(cid, m)| {
-                m.slot.as_deref() == Some(slot)
-                    && self.orders.get(symbol).is_some_and(|sm| sm.contains_key(*cid))
-            })
-            .map(|(cid, _)| cid.clone())
+        self.orders.get(symbol)?.keys()
+            .find(|cid| self.entry_metadata.get(*cid).is_some_and(|m| m.slot.as_deref() == Some(slot)))
+            .cloned()
     }
 
     /// Is the tracked entry count at or above `max`? `max == 0` means unlimited.
@@ -198,12 +195,8 @@ impl OrderTracker {
 
     /// All cids currently tracked as entries for a given symbol (regardless of slot).
     pub fn entry_cids_for_symbol(&self, symbol: &str) -> Vec<String> {
-        self.entry_metadata.keys()
-            .filter(|cid| {
-                self.orders.get(symbol).is_some_and(|sm| sm.contains_key(*cid))
-            })
-            .cloned()
-            .collect()
+        let Some(sm) = self.orders.get(symbol) else { return Vec::new() };
+        sm.keys().filter(|cid| self.entry_metadata.contains_key(*cid)).cloned().collect()
     }
 
     /// The **live** (still-resting) entry orders for one symbol, projected into
@@ -225,9 +218,9 @@ impl OrderTracker {
     /// strategy sees the same `entry_id` it placed with.
     pub fn entry_orders_for_symbol(&self, symbol: &str) -> Vec<EntryOrder> {
         let Some(sm) = self.orders.get(symbol) else { return Vec::new() };
-        self.entry_metadata.iter()
-            .filter_map(|(cid, meta)| {
-                let order = sm.get(cid)?;
+        sm.iter()
+            .filter_map(|(cid, order)| {
+                let meta = self.entry_metadata.get(cid)?;
                 if !matches!(order.status, OrderStatus::New | OrderStatus::PartiallyFilled) {
                     return None;
                 }
@@ -530,6 +523,20 @@ mod tests {
         assert_eq!(got, vec!["CA".to_string(), "CB".to_string()]);
 
         assert_eq!(tracker.entry_cids_for_symbol("SOLUSDT"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn symbol_lookups_skip_exits_and_other_symbols() {
+        let mut tracker = OrderTracker::new();
+        let slot = |s: &str| EntryMetadata { slot: Some(s.into()), entry_price: 1.0, ..Default::default() };
+        tracker.track_entry(make_order("BTCUSDT", "A", Some("CA")), slot("s1"));
+        tracker.track_order(make_order("BTCUSDT", "X", Some("EXIT")));
+        tracker.track_entry(make_order("ETHUSDT", "B", Some("CB")), slot("s2"));
+
+        assert_eq!(tracker.entry_cids_for_symbol("BTCUSDT"), vec!["CA".to_string()]);
+        assert_eq!(tracker.entry_orders_for_symbol("BTCUSDT").len(), 1, "an exit is not an entry");
+        assert_eq!(tracker.entry_cid_for_slot("BTCUSDT", "s2"), None, "another symbol's slot");
+        assert_eq!(tracker.entry_cid_for_slot("ETHUSDT", "s2").as_deref(), Some("CB"));
     }
 
     #[test]
