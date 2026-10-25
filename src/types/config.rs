@@ -521,7 +521,7 @@ fn default_monitor_port() -> u16 { 9100 }
 /// - **Off** — `{"enable": false}`: no Telegram at all (the key is `enable`,
 ///   the house convention, not `enabled`).
 /// - **Platform** — the key is absent entirely, OR `{"enable": true}` with no
-///   token: the runner defaults to the shared @rs_tradectl_bot relay when the
+///   token: the runner defaults to the shared @tradectlbot relay when the
 ///   account is linked (see `docs/telegram.md`). Absence is handled at the
 ///   `BotConfig.telegram: Option<_>` level; this struct covers the explicit
 ///   `{"enable": true}` opt-in.
