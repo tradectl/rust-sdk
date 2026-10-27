@@ -424,6 +424,8 @@ pub struct BotConfig {
 ```
 
 **ApiConfig.provider** values: `Binance`, `Bybit`, `OKX`, `Hyperliquid`, `HTX`, `Gate`, `Bitget`.
+
+**`check_run_config(&BotConfig) -> Vec<String>`** (`types/config.rs`): the rules a config must meet to run (`VALID_PROVIDERS` = Binance/Bybit/Hyperliquid, `VALID_MARKET_TYPES` = LINEAR/INVERSE, live credentials, name/type, pairs, hedge mode, `validate_leverage`). Reads enabled entries only; no strategy at all passes (skeleton bot). The CLI run/reload and the bot's import must both call it, so a config one accepts the other never refuses.
 ## BotState
 
 Shared state for MCP/AI access to live runner data. RwLock-based for concurrent reads.
