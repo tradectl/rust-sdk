@@ -54,6 +54,11 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// mismatch is usually attributable to.
 pub const SDK_RUSTC_VERSION: &str = env!("TRADECTL_RUSTC_VERSION");
 
+/// Starts every refusal from [`check_plugin_abi`] (ABI version, rustc, layout),
+/// so a caller can tell "reinstall this plugin" from any other load failure
+/// without matching the human text.
+pub const PLUGIN_INCOMPATIBLE_TAG: &str = "[plugin-incompatible]";
+
 // FNV-1a (64-bit) constants — a tiny order-sensitive const hash.
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -277,7 +282,8 @@ unsafe fn read_plugin_str(ptr: *const u8, len: usize) -> String {
 /// `Ok(())` — the plugin's ABI version and layout fingerprint match this CLI; it
 /// is safe to call `factory()`.
 ///
-/// `Err(msg)` — refuse to load; `msg` is a user-facing, actionable message.
+/// `Err(msg)` — refuse to load; `msg` is a user-facing, actionable message that
+/// starts with [`PLUGIN_INCOMPATIBLE_TAG`].
 ///
 /// The version check runs first and reads only `abi_version` (offset 0 of the
 /// `#[repr(C)]` header, correct for any plugin). It rejects any plugin whose
@@ -290,7 +296,7 @@ unsafe fn read_plugin_str(ptr: *const u8, len: usize) -> String {
 pub fn check_plugin_abi(plugin: &StrategyPlugin, key: &str) -> Result<(), String> {
     if plugin.abi_version != STRATEGY_ABI_VERSION {
         return Err(format!(
-            "strategy `{key}` was built for plugin ABI v{}, but this CLI expects v{}.\n  \
+            "{PLUGIN_INCOMPATIBLE_TAG} strategy `{key}` was built for plugin ABI v{}, but this CLI expects v{}.\n  \
              Reinstall it to get a matching build:  tradectl install {key}\n  \
              (or rebuild it against this CLI's tradectl-sdk).",
             plugin.abi_version, STRATEGY_ABI_VERSION,
@@ -318,7 +324,7 @@ pub fn check_plugin_abi(plugin: &StrategyPlugin, key: &str) -> Result<(), String
     // the only sound invariant is "same rustc built both sides".
     if plugin_rustc != SDK_RUSTC_VERSION {
         return Err(format!(
-            "strategy `{key}` was built with a different Rust compiler than this CLI and cannot be loaded safely.\n  \
+            "{PLUGIN_INCOMPATIBLE_TAG} strategy `{key}` was built with a different Rust compiler than this CLI and cannot be loaded safely.\n  \
              built with:  {plugin_rustc}  (tradectl-sdk {plugin_sdk})\n  \
              this CLI:    {host_rustc}  (tradectl-sdk {host_sdk})\n  \
              Rust has no stable ABI across compiler versions, so mismatched builds corrupt \
@@ -338,7 +344,7 @@ pub fn check_plugin_abi(plugin: &StrategyPlugin, key: &str) -> Result<(), String
     // rustc gate above is primary, not this).
     if plugin.abi_fingerprint != ABI_LAYOUT_FINGERPRINT {
         return Err(format!(
-            "strategy `{key}` was built against an incompatible tradectl-sdk source and cannot be loaded safely.\n  \
+            "{PLUGIN_INCOMPATIBLE_TAG} strategy `{key}` was built against an incompatible tradectl-sdk source and cannot be loaded safely.\n  \
              built with:  tradectl-sdk {plugin_sdk} ({plugin_rustc})\n  \
              this CLI:    tradectl-sdk {host_sdk} ({host_rustc})\n  \
              A plugin-boundary struct layout differs (fingerprint {:#018x} != {:#018x}); loading it \
@@ -444,5 +450,26 @@ mod tests {
         p.rustc_version_len = 0;
         let err = check_plugin_abi(&p, "shot").unwrap_err();
         assert!(err.contains("plugin ABI v"), "got: {err}");
+    }
+
+    #[test]
+    fn every_refusal_carries_the_tag_and_keeps_its_old_text() {
+        const OTHER: &str = concat!("rustc-other-", env!("CARGO_PKG_VERSION"));
+        let mut abi = host_plugin();
+        abi.abi_version = STRATEGY_ABI_VERSION + 1;
+        let mut rustc = host_plugin();
+        rustc.rustc_version = OTHER.as_ptr();
+        rustc.rustc_version_len = OTHER.len();
+        let mut layout = host_plugin();
+        layout.abi_fingerprint ^= 1;
+        for (p, old_text) in [
+            (abi, "was built for plugin ABI"),
+            (rustc, "different Rust compiler"),
+            (layout, "incompatible tradectl-sdk source"),
+        ] {
+            let err = check_plugin_abi(&p, "shot").unwrap_err();
+            assert!(err.starts_with(PLUGIN_INCOMPATIBLE_TAG), "got: {err}");
+            assert!(err.lines().next().unwrap().contains(old_text), "got: {err}");
+        }
     }
 }

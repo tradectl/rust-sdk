@@ -201,7 +201,8 @@ pub struct StrategyPlugin {
 
 Three load gates (`strategy/abi.rs` `check_plugin_abi`), in order: `abi_version` (offset 0,
 safe to read on any plugin) → `rustc_version` (the load-bearing one — Rust has no stable ABI
-across compiler versions) → `abi_fingerprint`. The fingerprint folds `size_of`/`align_of`/
+across compiler versions) → `abi_fingerprint`. Every refusal starts with
+`PLUGIN_INCOMPATIBLE_TAG` (`[plugin-incompatible]`); match on it, not on the text. The fingerprint folds `size_of`/`align_of`/
 `offset_of!` of every boundary type, **including the batch boundary** (`BatchConfig`,
 `BatchResult`, `BatchDiagnostics`, `BatchExchange`) as of v9, and the indicator boundary
 (`IndicatorRequest`, `IndicatorValue`) as of v10. A `BatchStrategy` *method* change
@@ -423,7 +424,6 @@ pub struct BotConfig {
 ```
 
 **ApiConfig.provider** values: `Binance`, `Bybit`, `OKX`, `Hyperliquid`, `HTX`, `Gate`, `Bitget`.
-
 ## BotState
 
 Shared state for MCP/AI access to live runner data. RwLock-based for concurrent reads.
