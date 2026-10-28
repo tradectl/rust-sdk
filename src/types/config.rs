@@ -395,20 +395,24 @@ impl BotConfig {
     /// Returns `true` if any symbol is traded by strategies with different
     /// directions, requiring the exchange to be in hedge (dual-side) mode.
     pub fn requires_hedge_mode(&self) -> bool {
-        let mut symbol_directions: HashMap<&str, Side> = HashMap::new();
-        for strat in &self.strats {
-            for pair in &strat.pairs {
-                if let Some(&existing) = symbol_directions.get(pair.as_str()) {
-                    if existing != strat.direction {
-                        return true;
-                    }
-                } else {
-                    symbol_directions.insert(pair, strat.direction);
+        opposite_directions_share_a_symbol(self.strats.iter())
+    }
+}
+
+fn opposite_directions_share_a_symbol<'a>(strats: impl Iterator<Item = &'a StratEntry>) -> bool {
+    let mut symbol_directions: HashMap<&str, Side> = HashMap::new();
+    for strat in strats {
+        for pair in &strat.pairs {
+            if let Some(&existing) = symbol_directions.get(pair.as_str()) {
+                if existing != strat.direction {
+                    return true;
                 }
+            } else {
+                symbol_directions.insert(pair, strat.direction);
             }
         }
-        false
     }
+    false
 }
 
 /// Paper trading emulation settings.
@@ -766,6 +770,116 @@ pub fn validate_leverage(config: &BotConfig) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Providers a bot runs on.
+pub const VALID_PROVIDERS: &[&str] = &["Binance", "Bybit", "Hyperliquid"];
+/// Market types a bot runs, in any case.
+pub const VALID_MARKET_TYPES: &[&str] = &["LINEAR", "INVERSE"];
+
+/// The rules a config must meet to run, as reasons (empty = valid). One
+/// function so the CLI (start and every reload) and the bot's import path
+/// cannot disagree: a config the import accepts and the CLI refuses is a
+/// process exit on the respawn, with the book left open.
+///
+/// No strategy at all passes: a skeleton bot waits in awaiting-setup. Only
+/// enabled entries are read, as the CLI strips disabled ones before it runs;
+/// `strats[i]` is the entry's index in `config.strats`.
+pub fn check_run_config(config: &BotConfig) -> Vec<String> {
+    let mut errors: Vec<String> = Vec::new();
+    let enabled = || config.strats.iter().enumerate().filter(|(_, s)| !s.disable);
+
+    if !VALID_PROVIDERS.contains(&config.api.provider.as_str()) {
+        errors.push(format!(
+            "unknown provider '{}' — must be one of: {}",
+            config.api.provider,
+            VALID_PROVIDERS.join(", ")
+        ));
+    }
+
+    // Credentials are needed for live entries only.
+    let all_paper = enabled().all(|(_, s)| s.is_emulator);
+    if !all_paper {
+        match config.api.provider.as_str() {
+            "Binance" | "Bybit" => {
+                let p = config.api.provider.to_lowercase();
+                if config.api.key.is_empty() {
+                    errors.push(format!(
+                        "api.key is required for {}. Set it in config.json or run `tradectl auth set {}`",
+                        config.api.provider, p
+                    ));
+                }
+                if config.api.secret.is_empty() {
+                    errors.push(format!(
+                        "api.secret is required for {}. Set it in config.json or run `tradectl auth set {}`",
+                        config.api.provider, p
+                    ));
+                }
+            }
+            "Hyperliquid" => {
+                if config.api.wallet_address.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "api.walletAddress is required for Hyperliquid. \
+                         Set it in config.json or run `tradectl auth set hyperliquid`".to_string()
+                    );
+                }
+                if config.api.private_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "api.privateKey is required for Hyperliquid. \
+                         Set it in config.json or run `tradectl auth set hyperliquid`".to_string()
+                    );
+                }
+            }
+            _ => {} // the provider rule above already refused it
+        }
+    }
+
+    for (i, strat) in enabled() {
+        let prefix = format!("strats[{}]", i);
+
+        if strat.name.trim().is_empty() {
+            errors.push(format!("{prefix}.name is required"));
+        }
+
+        if strat.strategy_type.trim().is_empty() {
+            errors.push(format!("{prefix}.type is required"));
+        }
+
+        // Any case, like the runner's `parse_market_type`.
+        if !VALID_MARKET_TYPES.contains(&strat.market_type.to_uppercase().as_str()) {
+            errors.push(format!(
+                "{prefix}.marketType '{}' is invalid — must be LINEAR or INVERSE",
+                strat.market_type
+            ));
+        }
+
+        if strat.pairs.is_empty() && !strat.params.contains_key("pairSelector") {
+            errors.push(format!("{prefix}.pairs is empty — at least one pair is required (or configure pairSelector)"));
+        }
+
+        if config.api.provider == "Hyperliquid" && strat.market_type == "INVERSE" {
+            errors.push(format!("{prefix}: Hyperliquid does not support INVERSE market type"));
+        }
+    }
+
+    // Opposite directions on one symbol need hedgeMode set to true: unset
+    // (auto-detect) is too risky, as on a one-way account every order that
+    // carries positionSide fails.
+    if opposite_directions_share_a_symbol(enabled().map(|(_, s)| s))
+        && config.api.hedge_mode != Some(true)
+    {
+        errors.push(
+            "strategies with opposite directions (LONG+SHORT) share a symbol but \
+             api.hedgeMode is not set to true — set \"hedgeMode\": true in the api config"
+            .to_string()
+        );
+    }
+
+    if let Err(e) = validate_leverage(config) {
+        errors.push(e);
+    }
+
+    errors
 }
 
 impl Default for ApiConfig {
@@ -2368,5 +2482,167 @@ mod leverage_tests {
             validate_leverage(&bot("Binance", Some(LeverageTarget::Fixed(10)), &[true])).is_ok(),
             "a number is fine on a paper-only bot"
         );
+    }
+}
+
+#[cfg(test)]
+mod run_config_tests {
+    use super::*;
+
+    fn entry(extra: serde_json::Value) -> StratEntry {
+        let mut v = serde_json::json!({
+            "name": "s", "type": "shot", "marketType": "LINEAR", "pairs": ["BTCUSDT"],
+            "isEmulator": true
+        });
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn bot(provider: &str, strats: Vec<StratEntry>) -> BotConfig {
+        let mut c = BotConfig::default();
+        c.api.provider = provider.to_string();
+        c.strats = strats;
+        c
+    }
+
+    fn paper(extra: serde_json::Value) -> BotConfig {
+        bot("Binance", vec![entry(extra)])
+    }
+
+    #[test]
+    fn a_skeleton_bot_with_no_strategy_passes() {
+        assert!(check_run_config(&BotConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn a_plain_paper_bot_passes() {
+        assert!(check_run_config(&paper(serde_json::json!({}))).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_provider_is_refused() {
+        let errors = check_run_config(&bot("OKX", vec![entry(serde_json::json!({}))]));
+        assert_eq!(
+            errors,
+            ["unknown provider 'OKX' — must be one of: Binance, Bybit, Hyperliquid"]
+        );
+    }
+
+    #[test]
+    fn a_live_binance_or_bybit_entry_needs_both_credentials() {
+        for (provider, lower) in [("Binance", "binance"), ("Bybit", "bybit")] {
+            let errors = check_run_config(&bot(provider, vec![entry(serde_json::json!({ "isEmulator": false }))]));
+            assert_eq!(
+                errors,
+                [
+                    format!("api.key is required for {provider}. Set it in config.json or run `tradectl auth set {lower}`"),
+                    format!("api.secret is required for {provider}. Set it in config.json or run `tradectl auth set {lower}`"),
+                ]
+            );
+        }
+        let mut c = bot("Binance", vec![entry(serde_json::json!({ "isEmulator": false }))]);
+        c.api.key = "k".into();
+        c.api.secret = "s".into();
+        assert!(check_run_config(&c).is_empty());
+    }
+
+    #[test]
+    fn a_live_hyperliquid_entry_needs_wallet_and_signer() {
+        let mut c = bot("Hyperliquid", vec![entry(serde_json::json!({ "isEmulator": false }))]);
+        assert_eq!(
+            check_run_config(&c),
+            [
+                "api.walletAddress is required for Hyperliquid. Set it in config.json or run `tradectl auth set hyperliquid`",
+                "api.privateKey is required for Hyperliquid. Set it in config.json or run `tradectl auth set hyperliquid`",
+            ]
+        );
+        c.api.wallet_address = Some("0xabc".into());
+        c.api.private_key = Some("0xdef".into());
+        assert!(check_run_config(&c).is_empty());
+    }
+
+    #[test]
+    fn name_and_type_are_required() {
+        let errors = check_run_config(&paper(serde_json::json!({ "name": " ", "type": "" })));
+        assert_eq!(errors, ["strats[0].name is required", "strats[0].type is required"]);
+    }
+
+    #[test]
+    fn spot_is_refused_and_any_case_of_linear_or_inverse_passes() {
+        assert_eq!(
+            check_run_config(&paper(serde_json::json!({ "marketType": "SPOT" }))),
+            ["strats[0].marketType 'SPOT' is invalid — must be LINEAR or INVERSE"]
+        );
+        for m in ["linear", "Inverse", "INVERSE"] {
+            assert!(check_run_config(&paper(serde_json::json!({ "marketType": m }))).is_empty(), "{m}");
+        }
+    }
+
+    #[test]
+    fn pairs_or_a_pair_selector_are_required() {
+        assert_eq!(
+            check_run_config(&paper(serde_json::json!({ "pairs": [] }))),
+            ["strats[0].pairs is empty — at least one pair is required (or configure pairSelector)"]
+        );
+        let c = paper(serde_json::json!({ "pairs": [], "pairSelector": { "top": 5 } }));
+        assert!(check_run_config(&c).is_empty());
+    }
+
+    #[test]
+    fn hyperliquid_refuses_inverse() {
+        let c = bot("Hyperliquid", vec![entry(serde_json::json!({ "marketType": "INVERSE" }))]);
+        assert_eq!(check_run_config(&c), ["strats[0]: Hyperliquid does not support INVERSE market type"]);
+    }
+
+    #[test]
+    fn opposite_directions_on_one_symbol_need_hedge_mode_true() {
+        let mut c = bot("Binance", vec![
+            entry(serde_json::json!({ "direction": "LONG" })),
+            entry(serde_json::json!({ "direction": "SHORT" })),
+        ]);
+        let want = "strategies with opposite directions (LONG+SHORT) share a symbol but \
+                    api.hedgeMode is not set to true — set \"hedgeMode\": true in the api config";
+        assert_eq!(check_run_config(&c), [want]);
+        c.api.hedge_mode = Some(false);
+        assert_eq!(check_run_config(&c), [want]);
+        c.api.hedge_mode = Some(true);
+        assert!(check_run_config(&c).is_empty());
+    }
+
+    #[test]
+    fn leverage_rules_are_included() {
+        let mut c = bot("Bybit", vec![entry(serde_json::json!({}))]);
+        c.api.leverage = Some(LeverageTarget::Fixed(10));
+        assert_eq!(check_run_config(&c), ["api.leverage is supported on Binance only (provider is Bybit)"]);
+    }
+
+    /// The CLI strips disabled entries before it checks, so a disabled entry
+    /// can never refuse a config the CLI would run.
+    #[test]
+    fn disabled_entries_are_not_read() {
+        let mut bad_live = entry(serde_json::json!({
+            "marketType": "SPOT", "pairs": [], "isEmulator": false, "direction": "SHORT"
+        }));
+        bad_live.disable = true;
+        let c = bot("Binance", vec![bad_live.clone(), entry(serde_json::json!({}))]);
+        assert!(check_run_config(&c).is_empty(), "{:?}", check_run_config(&c));
+
+        // An enabled entry after a disabled one is named by its own index.
+        let c = bot("Binance", vec![bad_live, entry(serde_json::json!({ "marketType": "SPOT" }))]);
+        assert_eq!(
+            check_run_config(&c),
+            ["strats[1].marketType 'SPOT' is invalid — must be LINEAR or INVERSE"]
+        );
+    }
+
+    /// Same result as the CLI's own path: strip the disabled entries, then check.
+    #[test]
+    fn a_stripped_config_gives_the_same_reasons() {
+        let mut off = entry(serde_json::json!({ "isEmulator": false }));
+        off.disable = true;
+        let c = bot("Binance", vec![entry(serde_json::json!({ "marketType": "SPOT" })), off]);
+        let mut stripped = c.clone();
+        stripped.strats.retain(|s| !s.disable);
+        assert_eq!(check_run_config(&c), check_run_config(&stripped));
     }
 }

@@ -19,8 +19,40 @@ Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit ca
 |---------|------|---------|
 | `monitor` | tokio-tungstenite, futures-util, tokio/net+rt+macros | engine/core (default) |
 | `runner` | clap | CLI dispatch |
+| `local-bot` | libc / windows-sys, rand | `local_bot` module: CLI, Lab, engine. Never in a strategy crate |
 
 Default: none.
+
+## Local bots (`local_bot`, feature `local-bot`)
+
+One OS lock per bot (`locks/<bot>.lock`, `File::try_lock`, never deleted) plus a holder record
+(`locks/<bot>.holder`, renamed to `.holder.last` before unlock). `bot_running(&Home, name)` is the
+one answer to "is it running": lock held + record verified (name, boot id, PID namespace, pid +
+OS start token) = `Running`; lock free + a v0.2.7 process found through `bot.pid` and its argv =
+`Legacy`. `Unknown` and `Starting` never lead to a signal; `signal::{terminate, kill}` re-verify
+the start token first. Also: `bot_id::check_at_start` (copy, move, other host), `status.json`
+(`StatusWriter`: one writer thread, never blocks the caller; with nothing to write it refreshes
+`updated_ms` once a minute until a terminal step, so a cut-off run says when it last ran), `delete::delete_stopped`,
+`exit` codes 73/75/76/77/78. Every function takes a `Home`; none reads the environment for it.
+Design: `docs/versions/v0.2.8-plan.md` section 10.
+
+`status.json` fields are additive (`#[serde(default)]`): `previous` (`PrevEnd`, a last run
+that ended with no terminal step, for the cut-off alert and the Lab's banner; its `live` is that
+run's `live`), `live` (this process could leave positions on an exchange; the CLI sets it), `wake`
+(`WakeNote` with `gap_ms`, `slept_ms`, `ResyncNote`), `plugins` (`PluginNote`: type, name,
+16-hex sha, the loaded copy). `CloseOut::Unchecked { closed, venue, market }` is a stop on a
+venue with no account read: `CloseOutVerdict::Unchecked`, exit 0, word `unchecked`
+(`close_out_doc` gives the venue, `venue_display` the name the CLI and the Lab show).
+`#[serde(other)]` catches a newer tradectl's states: `CloseOut::Unknown` (reads as failed),
+`ResyncNote::Other`, `Step::Other`, `ReasonKey::Unknown`, so one unknown value never makes
+the whole file unreadable. `ReasonKey::PluginBlocked`: Windows blocked the plugin.
+`exit::{encode_value, decode_value, line_value}`: `start-result:`/`stop-result:` values stay
+one word (`%`, space and bytes outside `0x21..=0x7e` as `%XX`); readers ignore unknown keys.
+`clock::{awake_ns, since_boot_ns}` (one clock stops in a sleep, the other does not: a sleep
+vs a stall), `blocked::{blocked, blocked_in}` (Windows code integrity / Smart App Control
+and antivirus error codes, pure on every OS), and Windows only `win::session` (the hidden
+window for `WM_QUERYENDSESSION`), `win::stop_event` (`Local\tradectl-stop-<run_id>`) and
+`win::run_key` (the autostart Run value).
 
 ## Strategy Trait
 
@@ -201,7 +233,8 @@ pub struct StrategyPlugin {
 
 Three load gates (`strategy/abi.rs` `check_plugin_abi`), in order: `abi_version` (offset 0,
 safe to read on any plugin) → `rustc_version` (the load-bearing one — Rust has no stable ABI
-across compiler versions) → `abi_fingerprint`. The fingerprint folds `size_of`/`align_of`/
+across compiler versions) → `abi_fingerprint`. Every refusal starts with
+`PLUGIN_INCOMPATIBLE_TAG` (`[plugin-incompatible]`); match on it, not on the text. The fingerprint folds `size_of`/`align_of`/
 `offset_of!` of every boundary type, **including the batch boundary** (`BatchConfig`,
 `BatchResult`, `BatchDiagnostics`, `BatchExchange`) as of v9, and the indicator boundary
 (`IndicatorRequest`, `IndicatorValue`) as of v10. A `BatchStrategy` *method* change
@@ -424,6 +457,7 @@ pub struct BotConfig {
 
 **ApiConfig.provider** values: `Binance`, `Bybit`, `OKX`, `Hyperliquid`, `HTX`, `Gate`, `Bitget`.
 
+**`check_run_config(&BotConfig) -> Vec<String>`** (`types/config.rs`): the rules a config must meet to run (`VALID_PROVIDERS` = Binance/Bybit/Hyperliquid, `VALID_MARKET_TYPES` = LINEAR/INVERSE, live credentials, name/type, pairs, hedge mode, `validate_leverage`). Reads enabled entries only; no strategy at all passes (skeleton bot). The CLI run/reload and the bot's import must both call it, so a config one accepts the other never refuses.
 ## BotState
 
 Shared state for MCP/AI access to live runner data. RwLock-based for concurrent reads.

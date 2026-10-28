@@ -10,6 +10,8 @@ pub mod reader;
 pub mod license;
 #[cfg(feature = "monitor")]
 pub mod monitor;
+#[cfg(feature = "local-bot")]
+pub mod local_bot;
 #[cfg(feature = "runner")]
 mod run_cli;
 
