@@ -133,6 +133,10 @@ pub enum ReasonKey {
     PluginIncompatible,
     #[serde(rename = "plugin_missing")]
     PluginMissing,
+    /// Windows code integrity (Smart App Control, WDAC, a policy) refused
+    /// the strategy file.
+    #[serde(rename = "plugin_blocked")]
+    PluginBlocked,
     #[serde(rename = "port_taken")]
     PortTaken,
     #[serde(rename = "port_reserved")]
@@ -163,6 +167,7 @@ impl ReasonKey {
             ReasonKey::Config => "config",
             ReasonKey::PluginIncompatible => "plugin_incompatible",
             ReasonKey::PluginMissing => "plugin_missing",
+            ReasonKey::PluginBlocked => "plugin_blocked",
             ReasonKey::PortTaken => "port_taken",
             ReasonKey::PortReserved => "port_reserved",
             ReasonKey::CrashLoop => "crash_loop",
@@ -187,6 +192,92 @@ pub enum CloseOut {
     Partial {
         closed: u32,
     },
+    /// The bot closed every position it tracked; the venue has no account
+    /// read to confirm it. `venue`: the provider in lower case; `market`:
+    /// `linear`, `inverse` or `spot`.
+    Unchecked {
+        closed: u32,
+        venue: String,
+        market: String,
+    },
+    /// A state a newer tradectl wrote. Reads as failed.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The name a person knows `venue` by, with " Spot" for `market` `spot`.
+pub fn venue_display(venue: &str, market: &str) -> String {
+    let name = match venue {
+        "okx" => "OKX",
+        "gate" => "Gate",
+        "htx" => "HTX",
+        "hyperliquid" => "Hyperliquid",
+        "bitget" => "Bitget",
+        "binance" => "Binance",
+        "bybit" => "Bybit",
+        other => other,
+    };
+    if market == "spot" {
+        format!("{name} Spot")
+    } else {
+        name.to_string()
+    }
+}
+
+/// The run before this one ended without a terminal step (section 2.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrevEnd {
+    pub run_id: String,
+    /// Its last step: `stopping` = cut off while closing positions.
+    pub step: Step,
+    /// Its last `updated_ms`.
+    pub at_ms: i64,
+    /// `crash.log` is newer: the crash was paged already.
+    pub crashed: bool,
+}
+
+/// The last time the bot did not run for a while (section 6.2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeNote {
+    /// Wall-clock times, for the text only.
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Of the gap, the time the computer slept.
+    pub slept_ms: u64,
+    /// The whole gap on the boot clock. `slept_ms >= gap_ms / 2`: the
+    /// computer slept; else the bot did not run.
+    #[serde(default)]
+    pub gap_ms: u64,
+    pub resync: ResyncNote,
+}
+
+/// The order re-sync after a wake.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ResyncNote {
+    Pending,
+    Done {
+        fills: u32,
+        cancels: u32,
+    },
+    TimedOut,
+    /// A paper-only bot: nothing crossed a network.
+    NotNeeded,
+    /// A state a newer tradectl wrote.
+    #[serde(other)]
+    Other,
+}
+
+/// A strategy plugin as loaded (section 7.2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginNote {
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub name: String,
+    /// The first 16 hex chars of the file's SHA-256.
+    pub sha: String,
+    /// The copy the bot loaded.
+    pub file: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +323,13 @@ pub struct StatusDoc {
     pub alert: Option<String>,
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// The run before ended without a stop.
+    #[serde(default)]
+    pub previous: Option<PrevEnd>,
+    #[serde(default)]
+    pub wake: Option<WakeNote>,
+    #[serde(default)]
+    pub plugins: Vec<PluginNote>,
 }
 
 /// How the holder ends ([`StatusHandle::terminal_blocking`]).
@@ -312,6 +410,9 @@ impl StatusWriter {
             close_out: None,
             alert: None,
             exit_code: None,
+            previous: None,
+            wake: None,
+            plugins: Vec::new(),
         };
         let shared = Arc::new(Shared {
             doc: Mutex::new(doc),
@@ -567,6 +668,9 @@ pub enum CloseOutVerdict {
     Failed,
     /// Stopped, only some symbols could be checked.
     Partial,
+    /// Stopped, closed what it tracked; the venue has no account read to
+    /// confirm it.
+    Unchecked,
     /// Ended before it finished closing (aborted, OOM, SIGKILL), or no
     /// record of this run.
     Unknown,
@@ -578,7 +682,10 @@ impl CloseOutVerdict {
     /// 0, or 77 when positions may be open.
     pub fn exit_code(self) -> i32 {
         match self {
-            CloseOutVerdict::Done | CloseOutVerdict::Nothing | CloseOutVerdict::Unconfirmed => 0,
+            CloseOutVerdict::Done
+            | CloseOutVerdict::Nothing
+            | CloseOutVerdict::Unchecked
+            | CloseOutVerdict::Unconfirmed => 0,
             CloseOutVerdict::Failed | CloseOutVerdict::Partial | CloseOutVerdict::Unknown => {
                 super::exit::STOPPED_NOT_CLOSED
             }
@@ -592,6 +699,7 @@ impl CloseOutVerdict {
             CloseOutVerdict::Nothing => "none",
             CloseOutVerdict::Failed => "failed",
             CloseOutVerdict::Partial => "partial",
+            CloseOutVerdict::Unchecked => "unchecked",
             CloseOutVerdict::Unknown => "unknown",
             CloseOutVerdict::Unconfirmed => "unconfirmed",
         }
@@ -602,6 +710,9 @@ impl CloseOutVerdict {
             CloseOutVerdict::Done | CloseOutVerdict::Nothing => None,
             CloseOutVerdict::Failed => Some("positions NOT closed; check the exchange"),
             CloseOutVerdict::Partial => Some("only some symbols could be checked; check the exchange"),
+            CloseOutVerdict::Unchecked => {
+                Some("closed what it tracked; the exchange gives no account read to confirm it")
+            }
             CloseOutVerdict::Unknown => Some("the bot ended before it finished closing; check the exchange"),
             CloseOutVerdict::Unconfirmed => Some("older bot: cannot confirm the close-out"),
         }
@@ -612,16 +723,25 @@ impl CloseOutVerdict {
 /// the target holder's; `None` for a legacy target.
 pub fn close_out_verdict(home: &Home, name: &str, run_id: Option<&str>) -> CloseOutVerdict {
     let Some(run_id) = run_id else { return CloseOutVerdict::Unconfirmed };
-    let Some(doc) = read(home, name).filter(|d| d.run_id == run_id) else { return CloseOutVerdict::Unknown };
-    if doc.step != Step::Stopped {
-        return CloseOutVerdict::Unknown;
-    }
+    let Some(doc) = stopped_doc(home, name, run_id) else { return CloseOutVerdict::Unknown };
     match (&doc.close_out, &doc.alert) {
         (Some(CloseOut::Partial { .. }), _) => CloseOutVerdict::Partial,
-        (Some(CloseOut::Failed { .. }), _) | (_, Some(_)) => CloseOutVerdict::Failed,
+        (Some(CloseOut::Failed { .. } | CloseOut::Unknown), _) | (_, Some(_)) => CloseOutVerdict::Failed,
+        (Some(CloseOut::Unchecked { .. }), None) => CloseOutVerdict::Unchecked,
         (Some(CloseOut::Done { .. }), None) => CloseOutVerdict::Done,
         (None, None) => CloseOutVerdict::Nothing,
     }
+}
+
+/// The close-out a stopped run recorded, for the words around a verdict
+/// (the venue of [`CloseOut::Unchecked`]). `None`: a legacy target, another
+/// run, not stopped, or nothing to close.
+pub fn close_out_doc(home: &Home, name: &str, run_id: Option<&str>) -> Option<CloseOut> {
+    stopped_doc(home, name, run_id?)?.close_out
+}
+
+fn stopped_doc(home: &Home, name: &str, run_id: &str) -> Option<StatusDoc> {
+    read(home, name).filter(|d| d.run_id == run_id && d.step == Step::Stopped)
 }
 
 #[cfg(test)]
@@ -817,6 +937,16 @@ mod tests {
         assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Partial);
         end("r1", Some(Terminal::Stopped { close_out: None, alert: Some("positions_not_closed".into()) }));
         assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Failed);
+        let unchecked = CloseOut::Unchecked { closed: 2, venue: "okx".into(), market: "linear".into() };
+        end("r1", Some(Terminal::Stopped { close_out: Some(unchecked.clone()), alert: None }));
+        assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Unchecked);
+        assert_eq!(close_out_doc(&t.home, "paper", Some("r1")), Some(unchecked.clone()));
+        assert_eq!(close_out_doc(&t.home, "paper", Some("r2")), None, "another run_id");
+        assert_eq!(close_out_doc(&t.home, "paper", None), None, "legacy");
+        end("r1", Some(Terminal::Stopped { close_out: Some(unchecked), alert: Some("positions_not_closed".into()) }));
+        assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Failed, "an alert wins");
+        end("r1", Some(Terminal::Stopped { close_out: Some(CloseOut::Unknown), alert: None }));
+        assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Failed, "a newer state fails safe");
         end("r1", Some(Terminal::Exited { code: 143, reason: "forced".into(), reason_key: None }));
         assert_eq!(close_out_verdict(&t.home, "paper", Some("r1")), V::Unknown);
         end("r1", None);
@@ -825,12 +955,92 @@ mod tests {
             (V::Done, 0, "done"),
             (V::Nothing, 0, "none"),
             (V::Unconfirmed, 0, "unconfirmed"),
+            (V::Unchecked, 0, "unchecked"),
             (V::Failed, 77, "failed"),
             (V::Partial, 77, "partial"),
             (V::Unknown, 77, "unknown"),
         ] {
             assert_eq!((v.exit_code(), v.word()), (code, word));
+            assert_eq!(v.message().is_none(), matches!(v, V::Done | V::Nothing), "{v:?}");
         }
+    }
+
+    #[test]
+    fn close_out_states_round_trip() {
+        for c in [
+            CloseOut::Done { closed: 3 },
+            CloseOut::Failed { left: 1, error: Some("no network".into()) },
+            CloseOut::Partial { closed: 1 },
+            CloseOut::Unchecked { closed: 2, venue: "okx".into(), market: "linear".into() },
+            CloseOut::Unknown,
+        ] {
+            let v = serde_json::to_value(&c).unwrap();
+            assert_eq!(serde_json::from_value::<CloseOut>(v).unwrap(), c);
+        }
+        let v = serde_json::to_value(CloseOut::Unchecked { closed: 2, venue: "gate".into(), market: "spot".into() });
+        assert_eq!(v.unwrap(), serde_json::json!({"state": "unchecked", "closed": 2, "venue": "gate", "market": "spot"}));
+        let newer: CloseOut = serde_json::from_str(r#"{"state":"half_closed","closed":1,"why":"x"}"#).unwrap();
+        assert_eq!(newer, CloseOut::Unknown);
+        for r in [
+            ResyncNote::Pending,
+            ResyncNote::Done { fills: 2, cancels: 1 },
+            ResyncNote::TimedOut,
+            ResyncNote::NotNeeded,
+        ] {
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(serde_json::from_value::<ResyncNote>(v).unwrap(), r);
+        }
+        assert_eq!(serde_json::to_value(ResyncNote::TimedOut).unwrap(), serde_json::json!({"state": "timed_out"}));
+        assert_eq!(serde_json::from_str::<ResyncNote>(r#"{"state":"later"}"#).unwrap(), ResyncNote::Other);
+        assert_eq!(serde_json::to_value(ReasonKey::PluginBlocked).unwrap(), "plugin_blocked");
+        assert_eq!(serde_json::from_str::<ReasonKey>("\"plugin_blocked\"").unwrap(), ReasonKey::PluginBlocked);
+    }
+
+    #[test]
+    fn the_phase_3_fields_round_trip() {
+        let t = TempHome::new();
+        t.bot("paper");
+        let h = spawn(&t, "r2");
+        let prev = PrevEnd { run_id: "r1".into(), step: Step::Stopping, at_ms: 42, crashed: false };
+        let wake = WakeNote {
+            from_ms: 1_000,
+            to_ms: 2_821_000,
+            slept_ms: 2_800_000,
+            gap_ms: 2_820_000,
+            resync: ResyncNote::Done { fills: 1, cancels: 0 },
+        };
+        let plugin =
+            PluginNote { ty: "shot".into(), name: "shot".into(), sha: "0123456789abcdef".into(), file: "/l/x".into() };
+        h.update(|d| {
+            d.previous = Some(prev.clone());
+            d.wake = Some(wake.clone());
+            d.plugins = vec![plugin.clone()];
+        });
+        h.wait_idle();
+        let d = read(&t.home, "paper").unwrap();
+        assert_eq!((d.previous, d.wake, d.plugins), (Some(prev), Some(wake), vec![plugin]));
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(t.home.status_path("paper")).unwrap()).unwrap();
+        assert_eq!(raw["previous"]["step"], "stopping");
+        assert_eq!(raw["wake"]["resync"]["state"], "done");
+        assert_eq!(raw["plugins"][0]["type"], "shot");
+        // A file from before Phase 3 has none of them.
+        let old = r#"{"v":1,"bot":"a","dir":"/x","run_id":"r","pid":1,"version":"0.2.8","mode":"service",
+                      "step":"running","since_ms":0,"updated_ms":0}"#;
+        let d: StatusDoc = serde_json::from_str(old).unwrap();
+        assert_eq!((d.previous, d.wake, d.plugins), (None, None, vec![]));
+        // A wake note without gap_ms, and a newer resync state.
+        let note: WakeNote =
+            serde_json::from_str(r#"{"from_ms":1,"to_ms":2,"slept_ms":3,"resync":{"state":"later"}}"#).unwrap();
+        assert_eq!((note.gap_ms, note.resync), (0, ResyncNote::Other));
+    }
+
+    #[test]
+    fn venue_names() {
+        assert_eq!(venue_display("okx", "linear"), "OKX");
+        assert_eq!(venue_display("hyperliquid", "inverse"), "Hyperliquid");
+        assert_eq!(venue_display("gate", "spot"), "Gate Spot");
+        assert_eq!(venue_display("custom", "linear"), "custom");
     }
 
     #[test]
