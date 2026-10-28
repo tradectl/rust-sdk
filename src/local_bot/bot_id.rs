@@ -331,6 +331,14 @@ pub(crate) fn check_with(home: &Home, name: &str, confirm: Confirm, env: &Env) -
             }
         }
         let f = mint_in(&this, record_host(env))?;
+        // The original's order tags, after the new id (which keeps a failed
+        // attempt refused for a tag-only copy): kept, they read as this bot's
+        // own or older tags, and a stop between runs would sweep the
+        // original's symbols. The engine mints a tag of its own.
+        match std::fs::remove_file(this.join(TAG_FILE)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         notes.push(format!("made a separate bot from {}; it uses the same exchange keys and pairs", o.display()));
         return Ok(Checked { check: IdCheck::Separated { new: f.id, of: o }, notes });
     }
@@ -482,10 +490,16 @@ mod tests {
             // Row 3 comes before the host rows.
             assert_eq!(run(&t, &w, "copy1", "h2"), IdCheck::Copy { of: orig.clone() });
 
-            // Row 4: --separate-copy gives a new id and drops pairing files.
+            // Row 4: --separate-copy gives a new id and drops pairing files
+            // and the original's order tags.
             for f in PAIRING_FILES {
                 std::fs::write(copy.join(f), "x").unwrap();
                 std::fs::write(orig.join(f), "x").unwrap();
+            }
+            if with_id {
+                // Every engine run writes one beside the id.
+                tag_file(&orig, "t-orig", &orig, Some("h1"));
+                std::fs::copy(orig.join(TAG_FILE), copy.join(TAG_FILE)).unwrap();
             }
             let c = check(&t, &w, "copy1", Confirm { separate_copy: true, ..Confirm::default() }, Some("h1"), false);
             let IdCheck::Separated { new, of } = c.check else { panic!("{c:?}") };
@@ -496,6 +510,8 @@ mod tests {
                 assert!(!copy.join(f).exists(), "{f} removed in the copy");
                 assert!(orig.join(f).exists(), "{f} kept in the original");
             }
+            assert!(!copy.join(TAG_FILE).exists(), "the original's tags are not the copy's");
+            assert!(read_tag(&orig).is_some(), "the original keeps its tag");
             assert_eq!(run(&t, &w, "copy1", "h1"), IdCheck::Same(new), "a separate bot now");
 
             // Row 5: moved (the original folder is gone).
