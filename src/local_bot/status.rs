@@ -21,6 +21,9 @@ pub const REASON_MAX: usize = 300;
 const COALESCE: Duration = Duration::from_secs(1);
 /// How long an exit path waits for the terminal write.
 const TERMINAL_WAIT: Duration = Duration::from_millis(500);
+/// While nothing changes, `updated_ms` is refreshed this often, so a run cut
+/// off later says when it last ran.
+const REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,12 +233,13 @@ pub struct PrevEnd {
     pub run_id: String,
     /// Its last step: `stopping` = cut off while closing positions.
     pub step: Step,
-    /// Its last `updated_ms`.
+    /// Its last `updated_ms`, refreshed every minute while it ran.
     pub at_ms: i64,
     /// `crash.log` is newer: the crash was paged already.
     pub crashed: bool,
-    /// The run could hold positions on an exchange: `false` for a step that trades
-    /// nothing (setup, park, config) or a paper-only bot. `None` from an older writer.
+    /// That run's [`StatusDoc::live`]: it could hold positions on an exchange.
+    /// `false` when it never went to the exchange with a live strategy (setup, a
+    /// park, a config error, a paper-only bot). `None` from an older writer.
     #[serde(default)]
     pub live: Option<bool>,
 }
@@ -330,6 +334,12 @@ pub struct StatusDoc {
     /// The run before ended without a stop.
     #[serde(default)]
     pub previous: Option<PrevEnd>,
+    /// This process could leave positions on an exchange: a run of it went to
+    /// the exchange with a live strategy, or the run before was cut off with
+    /// some. The next start copies it into [`PrevEnd::live`]. `None`: the
+    /// writer does not say.
+    #[serde(default)]
+    pub live: Option<bool>,
     #[serde(default)]
     pub wake: Option<WakeNote>,
     #[serde(default)]
@@ -388,6 +398,20 @@ impl StatusWriter {
         mode: Mode,
         start_nonce: Option<String>,
     ) -> StatusHandle {
+        Self::start(home, name, run_id, pid, version, mode, start_nonce, REFRESH)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        home: &Home,
+        name: &str,
+        run_id: &str,
+        pid: u32,
+        version: &str,
+        mode: Mode,
+        start_nonce: Option<String>,
+        refresh: Duration,
+    ) -> StatusHandle {
         let dir = home.bot_dir(name);
         let now = super::now_ms();
         let doc = StatusDoc {
@@ -415,6 +439,7 @@ impl StatusWriter {
             alert: None,
             exit_code: None,
             previous: None,
+            live: None,
             wake: None,
             plugins: Vec::new(),
         };
@@ -427,7 +452,7 @@ impl StatusWriter {
         let path = home.status_path(name);
         let thread_shared = shared.clone();
         let spawned =
-            std::thread::Builder::new().name("status-writer".into()).spawn(move || writer(path, thread_shared, rx));
+            std::thread::Builder::new().name("status-writer".into()).spawn(move || writer(path, thread_shared, rx, refresh));
         if let Err(e) = spawned {
             log::warn!("status.json writer did not start: {e}");
         }
@@ -524,7 +549,7 @@ impl StatusHandle {
     }
 }
 
-fn writer(path: PathBuf, shared: Arc<Shared>, rx: mpsc::Receiver<Msg>) {
+fn writer(path: PathBuf, shared: Arc<Shared>, rx: mpsc::Receiver<Msg>, refresh: Duration) {
     let mut last: Option<Instant> = None;
     let mut pending = false;
     let mut warned = false;
@@ -557,9 +582,19 @@ fn writer(path: PathBuf, shared: Arc<Shared>, rx: mpsc::Receiver<Msg>) {
                 }
             }
         } else {
-            match rx.recv() {
+            match rx.recv_timeout(refresh) {
                 Ok(m) => Some(m),
-                Err(_) => return,
+                // Nothing changed for a while: the run is still alive. A
+                // terminal record is not written again.
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let mut d = shared.doc();
+                    if d.step.is_terminal() {
+                        continue;
+                    }
+                    d.updated_ms = super::now_ms();
+                    None
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         };
         // One write covers everything queued: the document is shared.
@@ -766,6 +801,30 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "never saw {step:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// With nothing to write, `updated_ms` still moves on, so a run cut off
+    /// later says when it last ran; a terminal record stays as it was.
+    #[test]
+    fn a_quiet_run_refreshes_updated_ms_until_its_end() {
+        let t = TempHome::new();
+        t.bot("paper");
+        let h = StatusWriter::start(
+            &t.home, "paper", "r1", std::process::id(), "0.2.8", Mode::DaemonChild, None, Duration::from_millis(50),
+        );
+        h.step(Step::Running, None);
+        let first = wait_step(&t, Step::Running).updated_ms;
+        let t0 = Instant::now();
+        while read(&t.home, "paper").unwrap().updated_ms == first {
+            assert!(t0.elapsed() < Duration::from_secs(5), "updated_ms never moved");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(read(&t.home, "paper").unwrap().step, Step::Running);
+
+        h.terminal_blocking(Terminal::Stopped { close_out: None, alert: None });
+        let end = read(&t.home, "paper").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(read(&t.home, "paper").unwrap(), end, "the terminal record is not written again");
     }
 
     #[test]
@@ -1017,11 +1076,13 @@ mod tests {
             PluginNote { ty: "shot".into(), name: "shot".into(), sha: "0123456789abcdef".into(), file: "/l/x".into() };
         h.update(|d| {
             d.previous = Some(prev.clone());
+            d.live = Some(false);
             d.wake = Some(wake.clone());
             d.plugins = vec![plugin.clone()];
         });
         h.wait_idle();
         let d = read(&t.home, "paper").unwrap();
+        assert_eq!(d.live, Some(false));
         assert_eq!((d.previous, d.wake, d.plugins), (Some(prev), Some(wake), vec![plugin]));
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(t.home.status_path("paper")).unwrap()).unwrap();
@@ -1033,6 +1094,7 @@ mod tests {
                       "step":"running","since_ms":0,"updated_ms":0}"#;
         let d: StatusDoc = serde_json::from_str(old).unwrap();
         assert_eq!((d.previous, d.wake, d.plugins), (None, None, vec![]));
+        assert_eq!(d.live, None);
         // A wake note without gap_ms, and a newer resync state.
         let note: WakeNote =
             serde_json::from_str(r#"{"from_ms":1,"to_ms":2,"slept_ms":3,"resync":{"state":"later"}}"#).unwrap();

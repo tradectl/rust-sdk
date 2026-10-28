@@ -31,12 +31,14 @@ one answer to "is it running": lock held + record verified (name, boot id, PID n
 OS start token) = `Running`; lock free + a v0.2.7 process found through `bot.pid` and its argv =
 `Legacy`. `Unknown` and `Starting` never lead to a signal; `signal::{terminate, kill}` re-verify
 the start token first. Also: `bot_id::check_at_start` (copy, move, other host), `status.json`
-(`StatusWriter`: one writer thread, never blocks the caller), `delete::delete_stopped`,
+(`StatusWriter`: one writer thread, never blocks the caller; with nothing to write it refreshes
+`updated_ms` once a minute until a terminal step, so a cut-off run says when it last ran), `delete::delete_stopped`,
 `exit` codes 73/75/76/77/78. Every function takes a `Home`; none reads the environment for it.
 Design: `docs/versions/v0.2.8-plan.md` section 10.
 
 `status.json` fields are additive (`#[serde(default)]`): `previous` (`PrevEnd`, a last run
-that ended with no terminal step, for the cut-off alert and the Lab's banner), `wake`
+that ended with no terminal step, for the cut-off alert and the Lab's banner; its `live` is that
+run's `live`), `live` (this process could leave positions on an exchange; the CLI sets it), `wake`
 (`WakeNote` with `gap_ms`, `slept_ms`, `ResyncNote`), `plugins` (`PluginNote`: type, name,
 16-hex sha, the loaded copy). `CloseOut::Unchecked { closed, venue, market }` is a stop on a
 venue with no account read: `CloseOutVerdict::Unchecked`, exit 0, word `unchecked`
