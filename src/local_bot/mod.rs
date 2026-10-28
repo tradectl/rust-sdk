@@ -1,6 +1,8 @@
 //! Local bot rules, shared by the CLI, the Lab and the engine: one OS lock
 //! per bot, the holder record, process identity, bots started by v0.2.7 and
-//! older (no lock), the bot id, `status.json` and Delete.
+//! older (no lock), the bot id, `status.json` and Delete. Also the boot
+//! clocks that see a sleep, the Windows block codes, and on Windows the
+//! session-end window, the stop event and the autostart Run value.
 //!
 //! "Running" means: the bot's lock is held and its holder record names a
 //! live process ([`running::bot_running`]). Every function takes a [`Home`]
@@ -16,7 +18,9 @@
 //! ~/.tradectl/trash/<bot>-<16 hex>      a deleted folder on its way out
 //! ```
 
+pub mod blocked;
 pub mod bot_id;
+pub mod clock;
 pub mod delete;
 pub mod exit;
 pub mod folders;
