@@ -115,6 +115,16 @@ pub fn read_last(home: &Home, name: &str) -> Option<Holder> {
     serde_json::from_str(&std::fs::read_to_string(home.holder_last_path(name)).ok()?).ok()
 }
 
+/// Every current record in `locks/`, parsed; for the copy check.
+pub(crate) fn read_all(home: &Home) -> Vec<Holder> {
+    let Ok(entries) = std::fs::read_dir(home.locks_dir()) else { return Vec::new() };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".holder"))
+        .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .collect()
+}
+
 impl BotLock {
     /// Write this holder's record (in `locks/`, outside the bot folder).
     pub fn write_holder(&self, record: &Holder) -> io::Result<()> {

@@ -16,11 +16,13 @@
 //! ~/.tradectl/trash/<bot>-<16 hex>      a deleted folder on its way out
 //! ```
 
+pub mod bot_id;
 pub mod exit;
 pub mod folders;
 pub mod fsx;
 pub mod holder;
 pub mod home;
+pub mod host_id;
 pub mod legacy;
 pub mod lock;
 pub mod names;
