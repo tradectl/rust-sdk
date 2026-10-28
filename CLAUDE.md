@@ -19,8 +19,21 @@ Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit ca
 |---------|------|---------|
 | `monitor` | tokio-tungstenite, futures-util, tokio/net+rt+macros | engine/core (default) |
 | `runner` | clap | CLI dispatch |
+| `local-bot` | libc / windows-sys, rand | `local_bot` module: CLI, Lab, engine. Never in a strategy crate |
 
 Default: none.
+
+## Local bots (`local_bot`, feature `local-bot`)
+
+One OS lock per bot (`locks/<bot>.lock`, `File::try_lock`, never deleted) plus a holder record
+(`locks/<bot>.holder`, renamed to `.holder.last` before unlock). `bot_running(&Home, name)` is the
+one answer to "is it running": lock held + record verified (name, boot id, PID namespace, pid +
+OS start token) = `Running`; lock free + a v0.2.7 process found through `bot.pid` and its argv =
+`Legacy`. `Unknown` and `Starting` never lead to a signal; `signal::{terminate, kill}` re-verify
+the start token first. Also: `bot_id::check_at_start` (copy, move, other host), `status.json`
+(`StatusWriter`: one writer thread, never blocks the caller), `delete::delete_stopped`,
+`exit` codes 73/75/76/77/78. Every function takes a `Home`; none reads the environment for it.
+Design: `docs/versions/v0.2.8-plan.md` section 10.
 
 ## Strategy Trait
 

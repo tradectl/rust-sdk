@@ -17,6 +17,7 @@
 //! ```
 
 pub mod bot_id;
+pub mod delete;
 pub mod exit;
 pub mod folders;
 pub mod fsx;
