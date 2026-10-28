@@ -35,6 +35,23 @@ the start token first. Also: `bot_id::check_at_start` (copy, move, other host), 
 `exit` codes 73/75/76/77/78. Every function takes a `Home`; none reads the environment for it.
 Design: `docs/versions/v0.2.8-plan.md` section 10.
 
+`status.json` fields are additive (`#[serde(default)]`): `previous` (`PrevEnd`, a last run
+that ended with no terminal step, for the cut-off alert and the Lab's banner), `wake`
+(`WakeNote` with `gap_ms`, `slept_ms`, `ResyncNote`), `plugins` (`PluginNote`: type, name,
+16-hex sha, the loaded copy). `CloseOut::Unchecked { closed, venue, market }` is a stop on a
+venue with no account read: `CloseOutVerdict::Unchecked`, exit 0, word `unchecked`
+(`close_out_doc` gives the venue, `venue_display` the name the CLI and the Lab show).
+`#[serde(other)]` catches a newer tradectl's states: `CloseOut::Unknown` (reads as failed),
+`ResyncNote::Other`, `Step::Other`, `ReasonKey::Unknown`, so one unknown value never makes
+the whole file unreadable. `ReasonKey::PluginBlocked`: Windows blocked the plugin.
+`exit::{encode_value, decode_value, line_value}`: `start-result:`/`stop-result:` values stay
+one word (`%`, space and bytes outside `0x21..=0x7e` as `%XX`); readers ignore unknown keys.
+`clock::{awake_ns, since_boot_ns}` (one clock stops in a sleep, the other does not: a sleep
+vs a stall), `blocked::{blocked, blocked_in}` (Windows code integrity / Smart App Control
+and antivirus error codes, pure on every OS), and Windows only `win::session` (the hidden
+window for `WM_QUERYENDSESSION`), `win::stop_event` (`Local\tradectl-stop-<run_id>`) and
+`win::run_key` (the autostart Run value).
+
 ## Strategy Trait
 
 ```rust
