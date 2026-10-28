@@ -2,6 +2,8 @@
 name = "tradectl-sdk"
 version = "0.2.7"
 edition = "2021"
+# File::try_lock (local-bot)
+rust-version = "1.89"
 description = "Crypto trading strategy SDK — types, traits, exchange abstractions"
 
 [features]
@@ -10,6 +12,10 @@ default = []
 # WS serving moved to tradectl-bot-api's `/v1/stream`, so no tungstenite here.
 monitor = ["tokio/sync"]
 runner = ["clap"]
+# Local bot rules shared by the CLI, the Lab and the engine: the lock, the
+# holder record, process identity, legacy detection, bot id, status.json,
+# Delete. OS code, so never enabled in a strategy crate.
+local-bot = ["dep:libc", "dep:windows-sys", "dep:rand"]
 
 [dependencies]
 async-trait = "0.1"
@@ -26,6 +32,16 @@ tracing-log = "0.2"
 flate2 = "1"
 once_cell = "1"
 dirs = "6"
+rand = { version = "0.9", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+  "Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation",
+  "Win32_System_Registry", "Win32_System_Console", "Win32_Storage_FileSystem",
+  "Wdk_System_Threading", "Win32_UI_Shell" ] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
