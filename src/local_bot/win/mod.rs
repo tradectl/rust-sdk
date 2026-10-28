@@ -1,4 +1,18 @@
-//! Windows process helpers.
+//! Windows helpers: std handles, and (Windows only) the session-end window,
+//! the stop event and the autostart Run value.
+
+#[cfg(windows)]
+pub mod run_key;
+#[cfg(windows)]
+pub mod session;
+#[cfg(windows)]
+pub mod stop_event;
+
+/// `s` as a NUL-terminated UTF-16 string.
+#[cfg(windows)]
+pub(crate) fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
 
 /// Clear `HANDLE_FLAG_INHERIT` on this process's own std handles, so a
 /// caller's pipe never leaks into a child: std spawns with
