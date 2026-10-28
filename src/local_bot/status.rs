@@ -234,6 +234,10 @@ pub struct PrevEnd {
     pub at_ms: i64,
     /// `crash.log` is newer: the crash was paged already.
     pub crashed: bool,
+    /// The run could hold positions on an exchange: `false` for a step that trades
+    /// nothing (setup, park, config) or a paper-only bot. `None` from an older writer.
+    #[serde(default)]
+    pub live: Option<bool>,
 }
 
 /// The last time the bot did not run for a while (section 6.2).
@@ -1001,7 +1005,7 @@ mod tests {
         let t = TempHome::new();
         t.bot("paper");
         let h = spawn(&t, "r2");
-        let prev = PrevEnd { run_id: "r1".into(), step: Step::Stopping, at_ms: 42, crashed: false };
+        let prev = PrevEnd { run_id: "r1".into(), step: Step::Stopping, at_ms: 42, crashed: false, live: Some(true) };
         let wake = WakeNote {
             from_ms: 1_000,
             to_ms: 2_821_000,
