@@ -196,7 +196,7 @@ pub struct HoldFrame {
 /// and the strategy's own state. Sent as an `Orders` frame when they change,
 /// and as part of an `OrdersSnapshot`. Empty `orders` and `positions` mean
 /// the task holds nothing now.
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq)]
 pub struct TaskOrders {
     pub timestamp_ms: u64,
     pub strategy_name: String,
@@ -406,6 +406,7 @@ mod tests {
             strat_type: "shot".into(),
             orders: (0..orders).map(|i| serde_json::json!({ "id": format!("o{i}") })).collect(),
             positions: Vec::new(),
+            ..Default::default()
         }
     }
 
