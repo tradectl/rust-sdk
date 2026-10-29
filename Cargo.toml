@@ -11,6 +11,9 @@ default = []
 # Channel-only now — the broadcaster needs just tokio's broadcast (sync). The
 # WS serving moved to tradectl-bot-api's `/v1/stream`, so no tungstenite here.
 monitor = ["tokio/sync"]
+# Test knobs of the monitor broadcaster: `MonitorBroadcaster::stats` and
+# `with_lane_capacities`. Tests and engine/e2e only.
+testhook = ["monitor"]
 runner = ["clap"]
 # Local bot rules shared by the CLI, the Lab and the engine: the lock, the
 # holder record, process identity, legacy detection, bot id, status.json,
