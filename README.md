@@ -80,29 +80,6 @@ pub trait MarketAdapter: Send + Sync {
 
 **`OrderTracker`** — in-memory order state with fill/complete/partial-fill callbacks.
 
-### Monitor (feature-gated)
-
-```toml
-tradectl-sdk = { git = "...", features = ["monitor"] }
-```
-
-WebSocket server that broadcasts live strategy state to connected clients. Zero overhead when no clients are connected.
-
-```rust
-use tradectl_sdk::monitor::*;
-
-let broadcaster = MonitorBroadcaster::start(&MonitorConfig::default()).await?;
-broadcaster.broadcast(&MonitorEvent::Tick(MonitorTick { /* ... */ }));
-```
-
-## Dependencies
-
-Core (always):
-`async-trait`, `chrono`, `serde`, `serde_json`, `tokio` (time + sync), `log`
-
-With `monitor`:
-adds `tokio-tungstenite`, `futures-util`, `tokio` (net + rt + macros)
-
 ## License
 
 Proprietary. See LICENSE for details.
