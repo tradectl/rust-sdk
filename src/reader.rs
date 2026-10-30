@@ -107,6 +107,25 @@ pub struct TradeRow {
     /// bots predating config versioning.
     #[serde(default)]
     pub config_version: String,
+    /// Part of the position is still open: a fill closed some of it, the
+    /// rest is on the venue. `false` on an older bot.
+    #[serde(default)]
+    pub open: bool,
+    /// The exit fills this row sums, oldest first, when there is more than
+    /// one. Empty for a one-fill trade and on an older bot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fills: Vec<TradeFill>,
+}
+
+/// One exit fill of a [`TradeRow`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeFill {
+    pub id: i64,
+    pub exit_price: f64,
+    pub quantity: f64,
+    pub profit_usd: f64,
+    pub close_reason_raw: String,
+    pub closed_at: i64,
 }
 
 /// Optional filters for [`TradeReader::list_trades`]. Empty-string / `None`
@@ -399,6 +418,15 @@ mod tests {
                 market_type: "linear".into(),
                 exchange: "binance".into(),
                 config_version: "cfg-test".into(),
+                open: true,
+                fills: vec![TradeFill {
+                    id: 6,
+                    exit_price: 101.0,
+                    quantity: 0.5,
+                    profit_usd: 0.5,
+                    close_reason_raw: "tp".into(),
+                    closed_at: 2,
+                }],
             }],
             next_cursor: Some("2:7".into()),
             total: 1,
@@ -409,6 +437,23 @@ mod tests {
         assert_eq!(back.rows[0].id, 7);
         assert_eq!(back.next_cursor.as_deref(), Some("2:7"));
         assert_eq!(back.total, 1);
+        assert!(back.rows[0].open);
+        assert_eq!(back.rows[0].fills.len(), 1);
+    }
+
+    // An older bot's row has neither field: closed, no fill list.
+    #[test]
+    fn an_older_trade_row_is_closed_with_no_fills() {
+        let mut v = serde_json::to_value(TradePage { rows: Vec::new(), next_cursor: None, total: 0 }).unwrap();
+        v["rows"] = serde_json::json!([{
+            "id": 1, "strategy": "s", "symbol": "X", "side": "LONG", "entry_price": 1.0,
+            "exit_price": 1.0, "quantity": 1.0, "profit_usd": 0.0, "profit_pct": 0.0,
+            "profit_pct_raw": 0.0, "close_reason_raw": "tp", "reason": "tp", "opened_at": 0,
+            "closed_at": 0, "entry_order_id": "e", "exit_order_id": "x", "mode": "live",
+            "source": "auto"
+        }]);
+        let back: TradePage = serde_json::from_value(v).unwrap();
+        assert!(!back.rows[0].open && back.rows[0].fills.is_empty());
     }
 
     // Funding fields are optional both ways: an older bot's body (no fields)

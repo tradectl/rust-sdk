@@ -22,7 +22,7 @@ pub use strategy::*;
 pub use reader::{
     CloseReason, CoinStat, DailyFunding, DailyStat, PositionReader, StatsReader, StatsResponse,
     StatsSummary, StatusInfo, StatusReader, TradeFilter, TradePage, TradeReader, TradeReaderError,
-    TradeRow,
+    TradeFill, TradeRow,
 };
 
 /// Entry point for self-contained strategy binaries.
