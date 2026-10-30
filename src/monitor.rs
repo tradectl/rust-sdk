@@ -304,7 +304,7 @@ pub const STREAM_MIN_PROTO: u32 = 2;
 pub const STREAM_CAPS: &[&str] = &[
     "state", "bot", "series", "order_move", "slot", "watch", "px", "managed", "kept_check", "held", "mid",
     "changed_ms", "rev", "resync", "logs_level", "log_seq", "beat", "entries_gated", "spawn_epoch",
-    "reason_args",
+    "reason_args", "account",
 ];
 
 /// First frame of every v2 connection.
@@ -528,9 +528,9 @@ pub struct Beat {
 
 /// Tagged event envelope for JSON serialization.
 ///
-/// `State` and `Bot` are not variants: the broadcaster joins them from JSON
-/// it already holds ([`MonitorBroadcaster::state_snapshot`],
-/// [`MonitorBroadcaster::publish_bot`]).
+/// `State`, `Bot` and `Account` are not variants: the broadcaster joins them
+/// from JSON it already holds ([`MonitorBroadcaster::state_snapshot`],
+/// [`MonitorBroadcaster::publish_bot`], [`MonitorBroadcaster::publish_account`]).
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum MonitorEvent {
@@ -632,6 +632,7 @@ pub struct StateParts {
     pub now_ms: u64,
     pub log_seq: Option<u64>,
     pub bot: bool,
+    pub account: bool,
     pub runs: bool,
     pub series: bool,
     pub tasks: bool,
@@ -647,6 +648,7 @@ impl StateParts {
             now_ms,
             log_seq,
             bot: true,
+            account: true,
             runs: true,
             series: true,
             tasks: true,
@@ -753,6 +755,7 @@ pub struct MonitorBroadcaster {
     series: Mutex<HashMap<u64, SeriesInfo>>,
     runs: Mutex<BTreeMap<String, RunStateFrame>>,
     bot: Mutex<Option<Arc<str>>>,
+    account: Mutex<Option<Arc<str>>>,
     book: watch::Sender<BookCounts>,
     next_slot: AtomicU64,
     rev: AtomicU64,
@@ -836,6 +839,7 @@ impl MonitorBroadcaster {
             series: Default::default(),
             runs: Default::default(),
             bot: Default::default(),
+            account: Default::default(),
             book,
             next_slot: AtomicU64::new(1),
             rev: AtomicU64::new(0),
@@ -1181,6 +1185,23 @@ impl MonitorBroadcaster {
         true
     }
 
+    /// Send the account read (an `AccountView` serialized by the engine) as
+    /// an `Account` frame to v2 clients, like [`Self::publish_bot`]: dropped
+    /// when equal to the last one; `true` when it changed.
+    pub fn publish_account(&self, json: Arc<str>) -> bool {
+        {
+            let mut account = self.account.lock().unwrap_or_else(|e| e.into_inner());
+            if account.as_deref() == Some(&*json) {
+                return false;
+            }
+            *account = Some(json.clone());
+        }
+        if self.v2_on(Lane::Fifo) && json.len() > 2 {
+            self.emit(None, Some((Route::fifo(), splice("Account", &json))));
+        }
+        true
+    }
+
     /// The last `Bot` body, for `/v1/status` and the contract test.
     pub fn bot_level(&self) -> Option<Arc<str>> {
         self.bot.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -1191,6 +1212,8 @@ impl MonitorBroadcaster {
     /// no publishing task waits on a `State`.
     pub fn state_snapshot(&self, parts: &StateParts) -> String {
         let bot = if parts.bot { self.bot_level() } else { None };
+        let account =
+            if parts.account { self.account.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { None };
         let runs: Option<Vec<RunStateFrame>> =
             parts.runs.then(|| self.runs.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect());
         let series = parts.series.then(|| self.series_groups());
@@ -1219,6 +1242,10 @@ impl MonitorBroadcaster {
         if let Some(bot) = bot.filter(|b| !b.is_empty()) {
             out.push_str(",\"bot\":");
             out.push_str(&bot);
+        }
+        if let Some(account) = account.filter(|a| !a.is_empty()) {
+            out.push_str(",\"account\":");
+            out.push_str(&account);
         }
         if let Some(runs) = runs {
             out.push_str(",\"runs\":");
@@ -1831,13 +1858,17 @@ mod tests {
         assert!(m.publish_bot(r#"{"trading":"running"}"#.into()));
         assert!(!m.publish_bot(r#"{"trading":"running"}"#.into()), "the same body is dropped");
         assert_eq!(state(&m)["bot"]["trading"], "running");
+        assert!(v.get("account").is_none(), "no account read published yet");
+        assert!(m.publish_account(r#"{"read":true}"#.into()));
+        assert!(!m.publish_account(r#"{"read":true}"#.into()), "the same body is dropped");
+        assert_eq!(state(&m)["account"]["read"], true);
 
         let detail = StateParts { reason: "detail".into(), now_ms: 8, tasks: true, ..Default::default() };
         let v = json(&m.state_snapshot(&detail));
         let mut keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         keys.sort();
         assert_eq!(keys, vec!["now_ms", "reason", "tasks", "type"], "a detail State has only the tasks");
-        assert_eq!(m.stats().states, 3);
+        assert_eq!(m.stats().states, 4);
     }
 
     /// `Bot` goes to v2 only, at both levels.
@@ -1851,6 +1882,11 @@ mod tests {
         let f = v2.events.try_recv().unwrap();
         assert_eq!((f.lane, f.audience), (Lane::Fifo, Audience::All));
         assert_eq!(f.json.as_ref(), r#"{"type":"Bot","trading":"halted"}"#);
+        assert!(m.publish_account(r#"{"read":true}"#.into()));
+        assert!(v1.try_recv().is_err());
+        let f = v2.events.try_recv().unwrap();
+        assert_eq!((f.lane, f.audience), (Lane::Fifo, Audience::All));
+        assert_eq!(f.json.as_ref(), r#"{"type":"Account","read":true}"#);
     }
 
     fn tick() -> MonitorTick {
