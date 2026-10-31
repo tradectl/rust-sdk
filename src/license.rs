@@ -51,6 +51,11 @@ pub struct LicenseState {
     pub free_max_order_usd: f64,
     /// Why the Free limits apply, for the log and the Lab. `None` with a slot.
     pub reason: Option<String>,
+    /// The user shares live trades with the platform (`users.stats_opt_in`).
+    pub share_trades: bool,
+    /// This state came from a platform answer in this process, not from the
+    /// cached token or expired claims.
+    pub confirmed: bool,
 }
 
 impl LicenseState {
@@ -63,6 +68,8 @@ impl LicenseState {
             free_symbols: FREE_SYMBOLS.iter().map(|s| s.to_string()).collect(),
             free_max_order_usd: FREE_MAX_ORDER_USD,
             reason: Some(reason.into()),
+            share_trades: false,
+            confirmed: false,
         }
     }
 
@@ -75,6 +82,8 @@ impl LicenseState {
             free_symbols: Vec::new(),
             free_max_order_usd: 0.0,
             reason: None,
+            share_trades: false,
+            confirmed: false,
         }
     }
 
@@ -105,6 +114,11 @@ pub fn fixed(state: Option<LicenseState>) -> (LicenseRx, LiveTx) {
     std::mem::forget(tx);
     let (live_tx, _live_rx) = watch::channel(false);
     (rx, live_tx)
+}
+
+/// A license tests can change mid-run: the sender drives the receiver.
+pub fn channel(state: Option<LicenseState>) -> (LicenseTx, LicenseRx) {
+    watch::channel(state)
 }
 
 #[cfg(test)]
@@ -141,5 +155,19 @@ mod tests {
         let (rx, live) = fixed(None);
         assert!(rx.borrow().is_none());
         live.send_replace(true); // nobody listens, must not panic
+    }
+
+    #[test]
+    fn built_states_share_nothing() {
+        for s in [LicenseState::free("x"), LicenseState::unlimited(Tier::Pro)] {
+            assert!(!s.share_trades && !s.confirmed);
+        }
+    }
+
+    #[test]
+    fn channel_carries_changes() {
+        let (tx, rx) = channel(None);
+        tx.send_replace(Some(LicenseState::unlimited(Tier::Starter)));
+        assert_eq!(rx.borrow().as_ref().map(|s| s.tier), Some(Tier::Starter));
     }
 }
