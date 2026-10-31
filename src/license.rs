@@ -52,9 +52,10 @@ pub struct LicenseState {
     /// Why the Free limits apply, for the log and the Lab. `None` with a slot.
     pub reason: Option<String>,
     /// The user shares live trades with the platform (`users.stats_opt_in`).
-    pub share_trades: bool,
-    /// This state came from a platform answer in this process, not from the
-    /// cached token or expired claims.
+    /// `None`: not known (a token without the claim, or no valid claims).
+    pub share_trades: Option<bool>,
+    /// `share_trades` came from a platform answer in this process, not from
+    /// the cached token.
     pub confirmed: bool,
 }
 
@@ -68,7 +69,7 @@ impl LicenseState {
             free_symbols: FREE_SYMBOLS.iter().map(|s| s.to_string()).collect(),
             free_max_order_usd: FREE_MAX_ORDER_USD,
             reason: Some(reason.into()),
-            share_trades: false,
+            share_trades: None,
             confirmed: false,
         }
     }
@@ -82,7 +83,7 @@ impl LicenseState {
             free_symbols: Vec::new(),
             free_max_order_usd: 0.0,
             reason: None,
-            share_trades: false,
+            share_trades: None,
             confirmed: false,
         }
     }
@@ -160,7 +161,7 @@ mod tests {
     #[test]
     fn built_states_share_nothing() {
         for s in [LicenseState::free("x"), LicenseState::unlimited(Tier::Pro)] {
-            assert!(!s.share_trades && !s.confirmed);
+            assert!(s.share_trades.is_none() && !s.confirmed);
         }
     }
 
