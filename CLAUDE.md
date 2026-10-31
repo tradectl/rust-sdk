@@ -10,7 +10,7 @@ Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit ca
 | `types/` | `enums.rs`, `types.rs`, `config.rs`, `profit.rs`, `order.rs` | All data types, enums, config structs, profit functions |
 | `exchange/` | `market_adapter.rs`, `errors.rs`, `test_exchange.rs`, `callbacks.rs` | MarketAdapter trait, error classification, test exchange |
 | `bot_state.rs` | — | Shared state for MCP/AI (RwLock-based) |
-| `monitor.rs` | — | WebSocket broadcast server (feature-gated) |
+| `monitor.rs` | — | Monitor frames and `MonitorBroadcaster`: the v1 `legacy` channel (fed only while a v1 client is connected), the v2 `events` and `ticks` channels of `WireFrame`s, registries (tasks by slot with kept slots and book counts, series, runs, bot level) for `State`, `tick_demand` |
 | `run_cli.rs` | — | CLI dispatch helpers (feature-gated) |
 
 ## Features
@@ -18,6 +18,7 @@ Core SDK crate (v0.1.8) — types, traits, ABI, exchange abstractions, profit ca
 | Feature | Adds | Used By |
 |---------|------|---------|
 | `monitor` | tokio-tungstenite, futures-util, tokio/net+rt+macros | engine/core (default) |
+| `testhook` | `MonitorBroadcaster::stats`, `with_lane_capacities` | tests, engine/e2e |
 | `runner` | clap | CLI dispatch |
 | `local-bot` | libc / windows-sys, rand | `local_bot` module: CLI, Lab, engine. Never in a strategy crate |
 
