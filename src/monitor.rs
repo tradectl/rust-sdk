@@ -241,6 +241,10 @@ pub struct TaskOrders {
     /// The venue time of `mid`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub book_ms: Option<u64>,
+    /// One contract's value in USD, on an inverse (COIN-M) task only: the
+    /// Lab's $ size of a row is contracts × this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_size: Option<f64>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -1506,6 +1510,17 @@ mod tests {
         assert_eq!(v["strategy_id"], "st_a");
         let v = serde_json::to_value(MonitorEvent::Fill(fill(None))).unwrap();
         assert!(v.get("strategy_id").is_none());
+    }
+
+    /// Only an inverse task's `Orders` frame names its contract size; a
+    /// linear one sends no extra bytes.
+    #[test]
+    fn contract_size_is_sent_only_when_set() {
+        let v = serde_json::to_value(MonitorEvent::Orders(task("BTCUSDT", 1))).unwrap();
+        assert!(v.get("contract_size").is_none());
+        let coin = TaskOrders { market: "inverse".into(), contract_size: Some(100.0), ..task("BTCUSD_PERP", 1) };
+        let v = serde_json::to_value(MonitorEvent::Orders(coin)).unwrap();
+        assert_eq!(v["contract_size"], 100.0);
     }
 
     fn task(symbol: &str, orders: usize) -> TaskOrders {
