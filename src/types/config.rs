@@ -639,6 +639,12 @@ pub struct ApiConfig {
     /// Supported by Binance only. Default: false.
     #[serde(default)]
     pub ws: bool,
+    /// Ask for `permessage-deflate` on the public market-data connections.
+    /// About 30% less data from the venue, for about 1% of a core. Binance
+    /// only; other adapters ignore it. A server that declines it is used
+    /// uncompressed. Read at bootstrap. Default: false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ws_compression: bool,
     /// Automatically reduce leverage to the exchange's per-symbol maximum
     /// during init. Prevents -2027 errors when the exchange lowers a symbol's
     /// max leverage below the account's cached value. Default: false.
@@ -892,6 +898,7 @@ impl Default for ApiConfig {
             private_key: None,
             passphrase: None,
             ws: false,
+            ws_compression: false,
             auto_adjust_leverage: false,
             hedge_mode: None,
             env: None,
@@ -2396,6 +2403,16 @@ mod leverage_tests {
         assert_eq!(a.leverage, None);
         let out = serde_json::to_value(&a).unwrap();
         assert!(out.get("leverage").is_none(), "absent must stay absent: {out}");
+    }
+
+    #[test]
+    fn ws_compression_is_off_unless_asked_and_written_only_when_on() {
+        let a = api("{}").unwrap();
+        assert!(!a.ws_compression);
+        assert!(serde_json::to_value(&a).unwrap().get("wsCompression").is_none());
+        let a = api(r#"{"wsCompression":true}"#).unwrap();
+        assert!(a.ws_compression);
+        assert_eq!(serde_json::to_value(&a).unwrap()["wsCompression"], true);
     }
 
     #[test]
