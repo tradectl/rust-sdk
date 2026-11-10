@@ -308,7 +308,7 @@ pub const STREAM_MIN_PROTO: u32 = 2;
 pub const STREAM_CAPS: &[&str] = &[
     "state", "bot", "series", "order_move", "slot", "watch", "px", "managed", "kept_check", "held", "mid",
     "changed_ms", "rev", "resync", "logs_level", "log_seq", "beat", "entries_gated", "spawn_epoch",
-    "reason_args", "account",
+    "reason_args", "account", "collector",
 ];
 
 /// First frame of every v2 connection.

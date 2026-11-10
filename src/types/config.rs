@@ -74,6 +74,10 @@ pub struct BotConfig {
     /// Absent means [`RecordingConfig::default`]: on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingConfig>,
+    /// Market data collector: record these symbols all the time, trading
+    /// nothing. Absent or no symbols means off. Restart-tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
@@ -108,6 +112,32 @@ impl Default for RecordingConfig {
             retention_days: Self::default_retention_days(),
             max_mb: Self::default_max_mb(),
         }
+    }
+}
+
+/// The `collect` block: symbols recorded around the clock, with no strategy.
+/// The venue is `api.provider`; only public market data is read, so no keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CollectConfig {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    /// Depth levels: 0 (none), 5, 10 or 20. Binance futures only.
+    #[serde(default)]
+    pub depth: u32,
+    /// `LINEAR` (default), `INVERSE` or `SPOT`. Used when no strategy names one.
+    #[serde(default = "CollectConfig::default_market_type", alias = "marketType")]
+    pub market_type: String,
+}
+
+impl CollectConfig {
+    fn default_market_type() -> String { "LINEAR".into() }
+
+    /// The symbols to collect, upper-cased, empty and repeated ones dropped.
+    pub fn active_symbols(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.symbols.iter().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()).collect();
+        v.sort();
+        v.dedup();
+        v
     }
 }
 
@@ -2484,6 +2514,30 @@ mod leverage_tests {
         .unwrap();
         let r = c.recording.unwrap();
         assert_eq!((r.enabled, r.depth, r.retention_days, r.max_mb), (true, 0, 30, 8192));
+    }
+
+    #[test]
+    fn collect_block_parses_with_defaults_and_camel_case() {
+        let c: BotConfig = serde_json::from_value(serde_json::json!({ "strats": [] })).unwrap();
+        assert!(c.collect.is_none());
+
+        let c: BotConfig = serde_json::from_value(serde_json::json!({
+            "strats": [], "collect": { "symbols": ["ethusdt", "BTCUSDT", " ", "BTCUSDT"] }
+        }))
+        .unwrap();
+        let k = c.collect.unwrap();
+        assert_eq!((k.depth, k.market_type.as_str()), (0, "LINEAR"));
+        assert_eq!(k.active_symbols(), vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+
+        let c: BotConfig = serde_json::from_value(serde_json::json!({
+            "strats": [], "collect": { "symbols": ["BTCUSD_PERP"], "depth": 5, "marketType": "INVERSE" }
+        }))
+        .unwrap();
+        let k = c.collect.clone().unwrap();
+        assert_eq!((k.depth, k.market_type.as_str()), (5, "INVERSE"));
+        // Round trip keeps the block.
+        let back: BotConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(back.collect, c.collect);
     }
 
     #[test]
