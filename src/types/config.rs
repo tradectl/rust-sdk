@@ -74,6 +74,10 @@ pub struct BotConfig {
     /// Absent means [`RecordingConfig::default`]: on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingConfig>,
+    /// Market data collector: record these symbols all the time, trading
+    /// nothing. Absent or no symbols means off. Restart-tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectConfig>,
     /// Strategy documentation (loaded from STRATEGY.md by CLI, not user-edited).
     #[serde(skip)]
     pub strategy_docs: HashMap<String, String>,
@@ -108,6 +112,50 @@ impl Default for RecordingConfig {
             retention_days: Self::default_retention_days(),
             max_mb: Self::default_max_mb(),
         }
+    }
+}
+
+/// The `collect` block: symbols recorded around the clock, with no strategy.
+/// The venue is `api.provider`; only public market data is read, so no keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CollectConfig {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    /// Depth levels: 0 (none), 5, 10 or 20. Binance futures only.
+    #[serde(default)]
+    pub depth: u32,
+    /// `LINEAR`, `INVERSE` or `SPOT`. Absent: the strategies' market, or
+    /// `LINEAR` with none. Set and different from the strategies' market, the
+    /// collector stays off and says why.
+    #[serde(default, alias = "marketType", skip_serializing_if = "Option::is_none")]
+    pub market_type: Option<String>,
+}
+
+impl CollectConfig {
+    /// What is wrong with this block, each naming its `collect.*` key.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(bad) = self.symbols.iter().find(|s| {
+            let s = s.trim();
+            s.is_empty() || s.len() > 32 || !s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        }) {
+            out.push(format!("collect.symbols: '{bad}' is not a symbol (letters, digits, '_' or '-')"));
+        }
+        if !matches!(self.depth, 0 | 5 | 10 | 20) {
+            out.push(format!("collect.depth: {} — must be 0, 5, 10 or 20", self.depth));
+        }
+        if let Some(m) = self.market_type.as_deref().filter(|m| !matches!(m.to_uppercase().as_str(), "LINEAR" | "INVERSE" | "SPOT")) {
+            out.push(format!("collect.marketType: '{m}' — must be LINEAR, INVERSE or SPOT"));
+        }
+        out
+    }
+
+    /// The symbols to collect, upper-cased, empty and repeated ones dropped.
+    pub fn active_symbols(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.symbols.iter().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()).collect();
+        v.sort();
+        v.dedup();
+        v
     }
 }
 
@@ -883,6 +931,14 @@ pub fn check_run_config(config: &BotConfig) -> Vec<String> {
 
     if let Err(e) = validate_leverage(config) {
         errors.push(e);
+    }
+
+    // With a strategy, a bad `collect` block only turns the collector off (the
+    // bot reports why); it must never keep a trading bot from starting.
+    if enabled().next().is_none() {
+        if let Some(c) = &config.collect {
+            errors.extend(c.problems());
+        }
     }
 
     errors
@@ -2484,6 +2540,46 @@ mod leverage_tests {
         .unwrap();
         let r = c.recording.unwrap();
         assert_eq!((r.enabled, r.depth, r.retention_days, r.max_mb), (true, 0, 30, 8192));
+    }
+
+    #[test]
+    fn collect_problems_name_their_keys_and_spare_a_trading_bot() {
+        let k = CollectConfig { symbols: vec!["BTC USDT".into()], depth: 7, market_type: Some("PERP".into()) };
+        let p = k.problems();
+        assert_eq!(p.len(), 3, "{p:?}");
+        assert!(p[0].starts_with("collect.symbols") && p[1].starts_with("collect.depth") && p[2].starts_with("collect.marketType"));
+        assert!(CollectConfig { symbols: vec!["BTCUSDT".into()], depth: 20, market_type: Some("linear".into()) }.problems().is_empty());
+
+        let only: BotConfig = serde_json::from_value(serde_json::json!({
+            "api": { "provider": "Binance" }, "strats": [], "collect": { "symbols": ["BTC USDT"], "depth": 7 }
+        }))
+        .unwrap();
+        let e = check_run_config(&only);
+        assert!(e.iter().any(|m| m.starts_with("collect.symbols")) && e.iter().any(|m| m.starts_with("collect.depth")), "{e:?}");
+    }
+
+    #[test]
+    fn collect_block_parses_with_defaults_and_camel_case() {
+        let c: BotConfig = serde_json::from_value(serde_json::json!({ "strats": [] })).unwrap();
+        assert!(c.collect.is_none());
+
+        let c: BotConfig = serde_json::from_value(serde_json::json!({
+            "strats": [], "collect": { "symbols": ["ethusdt", "BTCUSDT", " ", "BTCUSDT"] }
+        }))
+        .unwrap();
+        let k = c.collect.unwrap();
+        assert_eq!((k.depth, k.market_type.as_deref()), (0, None));
+        assert_eq!(k.active_symbols(), vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+
+        let c: BotConfig = serde_json::from_value(serde_json::json!({
+            "strats": [], "collect": { "symbols": ["BTCUSD_PERP"], "depth": 5, "marketType": "INVERSE" }
+        }))
+        .unwrap();
+        let k = c.collect.clone().unwrap();
+        assert_eq!((k.depth, k.market_type.as_deref()), (5, Some("INVERSE")));
+        // Round trip keeps the block.
+        let back: BotConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(back.collect, c.collect);
     }
 
     #[test]
