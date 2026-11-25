@@ -693,10 +693,10 @@ pub struct ApiConfig {
     /// uncompressed. Read at bootstrap. Default: false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ws_compression: bool,
-    /// Automatically reduce leverage to the exchange's per-symbol maximum
-    /// during init. Prevents -2027 errors when the exchange lowers a symbol's
-    /// max leverage below the account's cached value. Default: false.
-    #[serde(default)]
+    /// Lower a symbol's leverage to the exchange's maximum for it: at
+    /// subscribe time, and when an order is refused with -2027. Never
+    /// raises it. Default: true (`false` turns it off).
+    #[serde(default = "default_true")]
     pub auto_adjust_leverage: bool,
     /// Force hedge mode (dual-side position) on the exchange. `None` (the
     /// default — omit the key) means "leave it alone": the adapter detects
@@ -955,7 +955,7 @@ impl Default for ApiConfig {
             passphrase: None,
             ws: false,
             ws_compression: false,
-            auto_adjust_leverage: false,
+            auto_adjust_leverage: true,
             hedge_mode: None,
             env: None,
             entry_budget: None,
@@ -1499,6 +1499,17 @@ impl StratEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lowering leverage to a symbol's maximum is on unless the config
+    /// says `false`.
+    #[test]
+    fn auto_adjust_leverage_is_on_by_default() {
+        let on: ApiConfig = serde_json::from_str(r#"{"provider":"Binance"}"#).unwrap();
+        assert!(on.auto_adjust_leverage);
+        assert!(ApiConfig::default().auto_adjust_leverage);
+        let off: ApiConfig = serde_json::from_str(r#"{"provider":"Binance","autoAdjustLeverage":false}"#).unwrap();
+        assert!(!off.auto_adjust_leverage);
+    }
 
     #[test]
     fn parse_strat_entry() {

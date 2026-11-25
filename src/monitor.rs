@@ -1003,6 +1003,22 @@ impl MonitorBroadcaster {
         self.emit(legacy.as_deref(), v2_on.then(|| (Route::orders(slot, &rows.symbol), frame)));
     }
 
+    /// What the running live tasks hold now: `(symbol, long, quantity)` per
+    /// position row. Kept slots and paper tasks are left out.
+    pub fn held_positions(&self) -> Vec<(String, bool, f64)> {
+        let t = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        t.by_slot
+            .values()
+            .filter(|e| e.kept.is_none() && e.rows.mode != "paper")
+            .flat_map(|e| {
+                e.rows.positions.iter().filter_map(|p| {
+                    let q = p["quantity"].as_f64().filter(|q| *q > 0.0)?;
+                    Some((e.rows.symbol.clone(), p["side"] == "Long", q))
+                })
+            })
+            .collect()
+    }
+
     /// Every kept slot as its record, for the CLI to carry over a respawn.
     pub fn kept_slots(&self) -> Vec<KeptRecord> {
         let t = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
