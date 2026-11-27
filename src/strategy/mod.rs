@@ -543,7 +543,13 @@ pub struct StrategyPlugin {
 /// forced every strategy repo to touch its test fixtures purely because the
 /// context is built by literal; with `..Default::default()` available, a future
 /// field costs plugins nothing.
-pub const STRATEGY_ABI_VERSION: u32 = 11;
+///
+/// Bumped 11 → 12: the batch engine follows the scalar engine's rules so a
+/// sweep gives a backtest's numbers. `BatchConfig` gained `price_step`,
+/// `BatchResult` gained `losing_trades` and `max_drawdown`, and
+/// `BatchExchange` gained per-trial order size and stop delay, the order on
+/// the book during an amend, exit arm times and the last book.
+pub const STRATEGY_ABI_VERSION: u32 = 12;
 
 // Safety: StrategyPlugin is constructed at load time and used from a single thread.
 unsafe impl Send for StrategyPlugin {}

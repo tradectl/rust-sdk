@@ -215,7 +215,7 @@ pub enum MarketEvent { Ticker(TickerEvent), Trade(TradeEvent) }
 ## Plugin ABI
 
 ```rust
-pub const STRATEGY_ABI_VERSION: u32 = 11;
+pub const STRATEGY_ABI_VERSION: u32 = 12;
 
 #[repr(C)]
 pub struct StrategyPlugin {
@@ -269,7 +269,7 @@ pub trait BatchStrategy: Send {
 }
 ```
 
-**BatchConfig**: `initial_balance`, `fees` (taker/maker), `slippage`, `leverage`, `latency_ms`, `jitter_ms`, `sl_delay_ms`, `market_type`, `contract_size`. Indicators are *not* configured here — the batch declares them via `BatchStrategy::indicators()` and the driver publishes readings through `BatchExchange::set_indicators`.
+**BatchConfig**: `initial_balance`, `fees` (taker/maker), `slippage` (extra SL slippage, default 0), `leverage`, `latency_ms`, `jitter_ms`, `sl_delay_ms` (for trials that set none), `market_type`, `contract_size`, `price_step`. A batch strategy sets `BatchExchange::order_size[i]` and `sl_delay[i]` per trial from its params (left NaN = the old whole-margin sizing), and reads `busy_until[i]` to skip ticks while a request is in flight. The driver calls `BatchExchange::update_book` before each `process_ticker`. The rules are the scalar backtest's (see `backtest/CLAUDE.md` "Batch = scalar"). Indicators are *not* configured here — the batch declares them via `BatchStrategy::indicators()` and the driver publishes readings through `BatchExchange::set_indicators`.
 
 **compute_score**: `pnl% * min(trade_count / min_trades, 1.0) / (1 + max_dd%)` — rewards return, penalizes drawdown, gates on minimum trade count.
 
