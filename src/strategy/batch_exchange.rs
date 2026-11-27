@@ -5,8 +5,16 @@
 //! compose this: they own a `BatchExchange` and set entry prices via
 //! `process_ticker()`. Everything else — fill scheduling, exit checks, metrics —
 //! is handled here.
+//!
+//! The rules are the scalar engine's (`tradectl-backtest` `InMemoryExchange`),
+//! so a sweep and a backtest of the same params give the same trades and PnL:
+//! entries sized by the strategy's order size, an amend keeps the old price on
+//! the book until it lands, exits armed after the entry's REST round trip, a
+//! stop priced at the worst of the book side and the trade print, and flat
+//! trades counted as neither win nor loss. `backtest/tests/batch_parity.rs`
+//! holds the two engines to it.
 
-use crate::types::{IndicatorValue, TradeEvent, MarketType};
+use crate::types::{IndicatorValue, TradeEvent, TickerEvent, MarketType};
 use super::batch::{BatchConfig, BatchResult, BatchDiagnostics};
 
 /// SoA batch exchange engine. Owns all position state, fill logic, and metrics.
@@ -22,9 +30,10 @@ pub struct BatchExchange {
     pub leverage: f64,
     pub margin_per_pos: f64,
     pub latency_ms: u64,
-    sl_delay_ms: u64,
     pub market_type: MarketType,
     pub contract_size: f64,
+    /// Limit price tick (0 = none). See [`round_price`](Self::round_price).
+    pub price_step: f64,
 
     // ── Indicators: ONE set for all N trials ─────────────────────────
     /// Readings for the requests this batch declared, in declaration order.
@@ -40,17 +49,43 @@ pub struct BatchExchange {
     /// Empty when the batch declared none.
     pub indicators: Vec<IndicatorValue>,
 
+    // ── Book: ONE for all N trials ───────────────────────────────────
+    /// Last book ticker, published by the driver ([`update_book`](Self::update_book)).
+    /// Stop exits are priced against it. 0 = no book yet.
+    last_bid: f64,
+    last_ask: f64,
+
+    // ── Per-trial sizing and exit timing (set by the strategy) ───────
+    /// Order size per entry, as the strategy's `orderSize` (USD for linear,
+    /// base asset for inverse). NaN (the default) = not set: size by
+    /// `margin_per_pos * leverage`.
+    pub order_size: Vec<f64>,
+    /// Stop activation delay after the entry fill, per trial.
+    pub sl_delay: Vec<u64>,
+    /// The strategy waits on a request until then (the runner's
+    /// `busy_until`): ticks are not handled, and a fill is not delivered, so
+    /// its exits are not placed before it.
+    pub busy_until: Vec<u64>,
+    /// Positions whose fill the strategy has not been told yet, per trial.
+    unarmed: Vec<u8>,
+    unarmed_total: usize,
+
     // ── Pending entry state (per trial) ──────────────────────────────
-    /// Pending entry price. 0.0 = no pending entry.
+    /// Latest entry price the strategy asked for (rounded). 0.0 = no pending
+    /// entry. While an amend is in flight the book still holds the old price.
     pub entry_price: Vec<f64>,
-    /// Pending TP/SL prices — set alongside entry, applied on fill.
+    /// TP/SL for `entry_price`, applied if that price fills.
     pending_tp_price: Vec<f64>,
     pending_sl_price: Vec<f64>,
     /// Pending entry side: true = short, false = long.
     entry_is_short: Vec<bool>,
-    /// Timestamp when entry becomes active on the exchange (placement latency).
-    /// 0 = entry is active and fillable. >0 = entry placed but not yet on the book.
+    /// When `entry_price` reaches the book (placement or amend round trip).
+    /// 0 = it is there already.
     pub entry_active_at: Vec<u64>,
+    /// The order on the book now (0.0 = none yet), with its own TP/SL.
+    live_price: Vec<f64>,
+    live_tp_price: Vec<f64>,
+    live_sl_price: Vec<f64>,
 
     // ── Position state: n * max_positions elements ───────────────────
     pub pos_active: Vec<u8>,
@@ -58,6 +93,7 @@ pub struct BatchExchange {
     pos_quantity: Vec<f64>,
     pos_tp_price: Vec<f64>,
     pos_sl_price: Vec<f64>,
+    pos_tp_active_at: Vec<u64>,
     pos_sl_active_at: Vec<u64>,
     /// Position side: true = short, false = long.
     pos_is_short: Vec<bool>,
@@ -69,6 +105,7 @@ pub struct BatchExchange {
     // ── Metrics accumulators (per trial) ─────────────────────────────
     trade_count: Vec<u32>,
     winning_trades: Vec<u32>,
+    losing_trades: Vec<u32>,
     total_pnl: Vec<f64>,
     sum_wins: Vec<f64>,
     sum_losses: Vec<f64>,
@@ -77,6 +114,7 @@ pub struct BatchExchange {
     sum_neg_returns_sq: Vec<f64>,
     peak_equity: Vec<f64>,
     max_drawdown: Vec<f64>,
+    max_drawdown_abs: Vec<f64>,
     /// Timestamp of first completed trade per trial (for burst detection).
     first_trade_at: Vec<u64>,
     /// Timestamp of most recent completed trade per trial.
@@ -107,26 +145,38 @@ impl BatchExchange {
             leverage: config.leverage,
             margin_per_pos,
             latency_ms: config.latency_ms,
-            sl_delay_ms: config.sl_delay_ms,
             market_type: config.market_type,
             contract_size: config.contract_size,
+            price_step: config.price_step,
             indicators: Vec::new(),
+            last_bid: 0.0,
+            last_ask: 0.0,
+            order_size: vec![f64::NAN; n],
+            sl_delay: vec![config.sl_delay_ms; n],
+            busy_until: vec![0; n],
+            unarmed: vec![0; n],
+            unarmed_total: 0,
             entry_price: vec![0.0; n],
             pending_tp_price: vec![0.0; n],
             pending_sl_price: vec![0.0; n],
             entry_is_short: vec![false; n],
             entry_active_at: vec![0; n],
+            live_price: vec![0.0; n],
+            live_tp_price: vec![0.0; n],
+            live_sl_price: vec![0.0; n],
             pos_active: vec![0; total_slots],
             pos_entry_price: vec![0.0; total_slots],
             pos_quantity: vec![0.0; total_slots],
             pos_tp_price: vec![0.0; total_slots],
             pos_sl_price: vec![0.0; total_slots],
+            pos_tp_active_at: vec![0; total_slots],
             pos_sl_active_at: vec![0; total_slots],
             pos_is_short: vec![false; total_slots],
             active_count: vec![0; n],
             balance: vec![config.initial_balance; n],
             trade_count: vec![0; n],
             winning_trades: vec![0; n],
+            losing_trades: vec![0; n],
             total_pnl: vec![0.0; n],
             sum_wins: vec![0.0; n],
             sum_losses: vec![0.0; n],
@@ -135,6 +185,7 @@ impl BatchExchange {
             sum_neg_returns_sq: vec![0.0; n],
             peak_equity: vec![config.initial_balance; n],
             max_drawdown: vec![0.0; n],
+            max_drawdown_abs: vec![0.0; n],
             first_trade_at: vec![0; n],
             last_trade_at: vec![0; n],
             total_entries: 0,
@@ -156,10 +207,78 @@ impl BatchExchange {
         (x as u64) % max
     }
 
-    /// Place or edit a pending entry order with exit prices.
-    /// Applies placement latency + jitter. Strategy computes TP/SL from its params.
+    /// Publish the latest book ticker. The driver calls this before
+    /// `process_ticker`, like the scalar engine's `update_book`.
+    /// Also delivers fills that waited for a busy window to end.
     #[inline(always)]
-    pub fn set_entry(&mut self, trial: usize, price: f64, tp_price: f64, sl_price: f64, ts: u64, is_short: bool) {
+    pub fn update_book(&mut self, ticker: &TickerEvent) {
+        self.last_bid = ticker.bid_price;
+        self.last_ask = ticker.ask_price;
+        if self.unarmed_total > 0 {
+            for i in 0..self.n {
+                self.arm_due(i, ticker.timestamp_ms);
+            }
+        }
+    }
+
+    /// Place the exits of positions filled while the strategy was busy, once
+    /// it is free: the runner delivers `on_fill` at the first event after the
+    /// busy window, and the strategy's `SetExits` is sent then.
+    #[inline(always)]
+    fn arm_due(&mut self, trial: usize, now: u64) {
+        if self.unarmed[trial] == 0 || now < self.busy_until[trial] {
+            return;
+        }
+        let base = trial * self.max_positions;
+        for slot in base..base + self.max_positions {
+            if self.pos_active[slot] != 0 && self.pos_tp_active_at[slot] == u64::MAX {
+                self.arm_exits(trial, slot, now);
+            }
+        }
+        self.unarmed_total -= self.unarmed[trial] as usize;
+        self.unarmed[trial] = 0;
+    }
+
+    /// Exits go out at `now`: one round trip, and the stop also waits out its
+    /// delay. Sending them keeps the strategy busy for the round trip.
+    #[inline(always)]
+    fn arm_exits(&mut self, trial: usize, slot: usize, now: u64) {
+        let lat = self.latency_ms;
+        self.pos_tp_active_at[slot] = now + lat;
+        self.pos_sl_active_at[slot] = now + self.sl_delay[trial] + lat;
+        self.busy_until[trial] = self.busy_until[trial].max(now + lat);
+    }
+
+    /// Round a limit price to the tick, as the scalar engine does before it
+    /// stores an entry. Unchanged when `price_step` is 0.
+    #[inline(always)]
+    pub fn round_price(&self, price: f64) -> f64 {
+        let s = self.price_step;
+        if s > 0.0 { (price / s).round() * s } else { price }
+    }
+
+    /// Put the asked-for entry on the book once its round trip has landed.
+    #[inline(always)]
+    fn land(&mut self, trial: usize, now: u64) {
+        if self.entry_price[trial] > 0.0 && self.entry_active_at[trial] != 0 && now >= self.entry_active_at[trial] {
+            self.entry_active_at[trial] = 0;
+        }
+        if self.entry_active_at[trial] == 0 && self.entry_price[trial] > 0.0 {
+            self.live_price[trial] = self.entry_price[trial];
+            self.live_tp_price[trial] = self.pending_tp_price[trial];
+            self.live_sl_price[trial] = self.pending_sl_price[trial];
+        }
+    }
+
+    /// Place or amend a pending entry order with exit prices. Returns whether
+    /// it sent a request (the strategy is then busy for `latency_ms`).
+    ///
+    /// The scalar engine's rules: the price is rounded to `price_step`; the
+    /// same price again is skipped; a new price on the same side is an amend,
+    /// so the old order stays on the book (and can fill, with its own TP/SL)
+    /// until the amend lands; the other side replaces the order outright.
+    #[inline(always)]
+    pub fn set_entry(&mut self, trial: usize, price: f64, tp_price: f64, sl_price: f64, ts: u64, is_short: bool) -> bool {
         // Indicator warmup is enforced here rather than left to each strategy,
         // and it covers the whole declared set — which is shared by the grid, so
         // every trial in a sweep starts trading on the same bar. Per-trial
@@ -167,17 +286,51 @@ impl BatchExchange {
         // `compute_score` multiplies by trade count, so they would win the
         // sweep on warmup rather than on edge.
         if !self.indicators_warm() {
-            return;
+            return false;
+        }
+        let price = self.round_price(price);
+        let amend = self.entry_price[trial] > 0.0 && self.entry_is_short[trial] == is_short;
+        if amend {
+            if self.entry_price[trial] == price {
+                return false;
+            }
+            // Whatever was in flight lands first; it stays on the book until
+            // this amend does.
+            self.land(trial, ts);
+        } else {
+            self.live_price[trial] = 0.0;
         }
         self.entry_price[trial] = price;
         self.pending_tp_price[trial] = tp_price;
         self.pending_sl_price[trial] = sl_price;
         self.entry_is_short[trial] = is_short;
         let jitter = self.rand_u64(self.jitter_ms + 1);
-        self.entry_active_at[trial] = ts + self.latency_ms + jitter;
+        let delay = self.latency_ms + jitter;
+        self.entry_active_at[trial] = if delay == 0 { 0 } else { ts + delay };
+        // Busy until the reply, which is when the order lands.
+        self.busy_until[trial] = self.busy_until[trial].max(ts + delay);
+        self.land(trial, ts);
+        true
     }
 
-    /// Compute position quantity from entry price.
+    /// Position quantity for an entry at `entry_price`, like the scalar
+    /// engine's `size_to_quantity`. Contracts on inverse.
+    #[inline(always)]
+    pub fn entry_qty_for(&self, trial: usize, entry_price: f64) -> f64 {
+        // Any size the strategy set, as the scalar engine takes it: 0 is no
+        // trade on linear and one contract on inverse.
+        let size = self.order_size[trial];
+        if !size.is_nan() {
+            return match self.market_type {
+                MarketType::Inverse => (size * entry_price / self.contract_size).floor().max(1.0),
+                _ => size / entry_price,
+            };
+        }
+        self.entry_qty(entry_price)
+    }
+
+    /// Quantity when the strategy gives no order size: the trial's whole
+    /// margin slot times leverage.
     #[inline(always)]
     pub fn entry_qty(&self, entry_price: f64) -> f64 {
         let notional = self.margin_per_pos * self.leverage;
@@ -187,36 +340,23 @@ impl BatchExchange {
         }
     }
 
-    /// Process a trade event: check delayed fills, entry crosses, and TP/SL exits.
+    /// Process a trade event: exits of open positions, then the entry.
+    ///
+    /// Exits go first so a position filled by this very print is not checked
+    /// against it: the scalar engine arms a position's exits from `on_fill`,
+    /// after this trade has been matched.
     pub fn check_trade(&mut self, trade: &TradeEvent) {
         let price = trade.price;
         let ts = trade.timestamp_ms;
 
         let n = self.n;
         let mp = self.max_positions;
-        let _latency = self.latency_ms;
-        let sl_delay = self.sl_delay_ms;
 
         for i in 0..n {
-            // Step 1: Placement cooldown expired → entry is now on the book
-            if self.entry_active_at[i] > 0 && ts >= self.entry_active_at[i] {
-                self.entry_active_at[i] = 0;
-            }
+            // Step 0: a fill that waited for the busy window is delivered.
+            self.arm_due(i, ts);
 
-            // Step 2: Trade crosses active entry → fill immediately
-            // Long limit entry fills when price drops to entry; short when price rises.
-            if self.entry_active_at[i] == 0 && self.entry_price[i] > 0.0 {
-                let fills = if self.entry_is_short[i] {
-                    price >= self.entry_price[i]
-                } else {
-                    price <= self.entry_price[i]
-                };
-                if fills {
-                    self.fill_entry(i, ts, sl_delay);
-                }
-            }
-
-            // Step 3: Check TP/SL for all position slots
+            // Step 1: TP/SL for all position slots.
             let base = i * mp;
             for j in 0..mp {
                 let slot = base + j;
@@ -226,52 +366,87 @@ impl BatchExchange {
                     let tp_hit = if is_short { price <= self.pos_tp_price[slot] } else { price >= self.pos_tp_price[slot] };
                     // Long SL: price drops to SL. Short SL: price rises to SL.
                     let sl_hit = if is_short { price >= self.pos_sl_price[slot] } else { price <= self.pos_sl_price[slot] };
-                    if tp_hit {
+                    if tp_hit && ts >= self.pos_tp_active_at[slot] {
                         let tp = self.pos_tp_price[slot];
                         self.close_position_at(i, slot, tp, true, ts);
                         self.total_exits += 1;
                     } else if sl_hit && ts >= self.pos_sl_active_at[slot] {
-                        // Slippage: long exits below market, short exits above.
-                        let exit = if is_short {
-                            price * (1.0 + self.slippage_pct)
-                        } else {
-                            price * (1.0 - self.slippage_pct)
-                        };
+                        let exit = self.stop_fill_price(is_short, price);
                         self.close_position_at(i, slot, exit, false, ts);
                         self.total_exits += 1;
+                    }
+                }
+            }
+
+            // Step 2: the amend or placement in flight lands, then the order
+            // on the book fills if this print crosses it. Long limit fills when
+            // price drops to it; short when price rises to it.
+            if self.entry_price[i] > 0.0 {
+                self.land(i, ts);
+                let live = self.live_price[i];
+                if live > 0.0 {
+                    let fills = if self.entry_is_short[i] { price >= live } else { price <= live };
+                    if fills {
+                        self.fill_entry(i, ts);
                     }
                 }
             }
         }
     }
 
+    /// A stop's fill: the worst of the book side and the trade print, then
+    /// `slippage_pct` if asked for. Before any book, the print.
     #[inline(always)]
-    fn fill_entry(&mut self, trial: usize, ts: u64, sl_delay: u64) {
-        let entry = self.entry_price[trial];
-        let qty = self.entry_qty(entry);
+    fn stop_fill_price(&self, is_short: bool, price: f64) -> f64 {
+        if is_short {
+            // Buying back: the higher of ask and print.
+            let p = if self.last_ask > 0.0 { self.last_ask.max(price) } else { price };
+            p * (1.0 + self.slippage_pct)
+        } else {
+            // Selling: the lower of bid and print.
+            let p = if self.last_bid > 0.0 { self.last_bid.min(price) } else { price };
+            p * (1.0 - self.slippage_pct)
+        }
+    }
+
+    #[inline(always)]
+    fn fill_entry(&mut self, trial: usize, ts: u64) {
+        let entry = self.live_price[trial];
+        let qty = self.entry_qty_for(trial, entry);
         let is_short = self.entry_is_short[trial];
+        let tp = self.live_tp_price[trial];
+        let sl = self.live_sl_price[trial];
+        // The order is gone, and with it any amend still in flight.
+        self.entry_active_at[trial] = 0;
+        self.entry_price[trial] = 0.0;
+        self.live_price[trial] = 0.0;
+        if qty <= 0.0 {
+            return;
+        }
         let mp = self.max_positions;
         let base = trial * mp;
-        let mut placed = false;
         for j in 0..mp {
             let slot = base + j;
             if self.pos_active[slot] == 0 {
                 self.pos_active[slot] = 1;
                 self.pos_entry_price[slot] = entry;
                 self.pos_quantity[slot] = qty;
-                self.pos_tp_price[slot] = self.pending_tp_price[trial];
-                self.pos_sl_price[slot] = self.pending_sl_price[trial];
-                self.pos_sl_active_at[slot] = ts + sl_delay;
+                self.pos_tp_price[slot] = tp;
+                self.pos_sl_price[slot] = sl;
                 self.pos_is_short[slot] = is_short;
-                placed = true;
+                if ts >= self.busy_until[trial] {
+                    self.arm_exits(trial, slot, ts);
+                } else {
+                    // Not armed until the strategy hears of the fill.
+                    self.pos_tp_active_at[slot] = u64::MAX;
+                    self.pos_sl_active_at[slot] = u64::MAX;
+                    self.unarmed[trial] += 1;
+                    self.unarmed_total += 1;
+                }
+                self.active_count[trial] += 1;
+                self.total_entries += 1;
                 break;
             }
-        }
-        self.entry_active_at[trial] = 0;
-        self.entry_price[trial] = 0.0;
-        if placed {
-            self.active_count[trial] += 1;
-            self.total_entries += 1;
         }
     }
 
@@ -317,6 +492,7 @@ impl BatchExchange {
             self.winning_trades[trial] += 1;
             self.sum_wins[trial] += net_pnl;
         } else if net_pnl < 0.0 {
+            self.losing_trades[trial] += 1;
             self.sum_losses[trial] += net_pnl.abs();
         }
 
@@ -331,6 +507,9 @@ impl BatchExchange {
             self.peak_equity[trial] = equity;
         }
         let dd = self.peak_equity[trial] - equity;
+        if dd > self.max_drawdown_abs[trial] {
+            self.max_drawdown_abs[trial] = dd;
+        }
         if self.peak_equity[trial] > 0.0 {
             let dd_pct = dd / self.peak_equity[trial] * 100.0;
             if dd_pct > self.max_drawdown[trial] {
@@ -347,12 +526,14 @@ impl BatchExchange {
     /// this runs at the end of every sweep trial that bias accumulates into the
     /// rankings rather than into a single trade. Matches the scalar engine's
     /// `market_close_position` (`backtest/src/exchange.rs`, `Long => bid,
-    /// Short => ask`) and this engine's own slippage rule — "long exits below
-    /// market, short exits above".
+    /// Short => ask`).
     pub fn force_close_all(&mut self, bid_price: f64, ask_price: f64) {
         let mp = self.max_positions;
         for i in 0..self.n {
             self.entry_price[i] = 0.0;
+            self.live_price[i] = 0.0;
+            self.entry_active_at[i] = 0;
+            self.unarmed[i] = 0;
             let base = i * mp;
             for j in 0..mp {
                 let slot = base + j;
@@ -362,9 +543,12 @@ impl BatchExchange {
                 }
             }
         }
+        self.unarmed_total = 0;
     }
 
-    /// Collect results for all trials.
+    /// Collect results for all trials. The ratios follow the scalar engine's
+    /// `BacktestMetrics` (standard deviation floored at 1e-4, an all-win
+    /// profit factor is infinite).
     pub fn results(&self) -> Vec<BatchResult> {
         (0..self.n)
             .map(|i| {
@@ -378,32 +562,21 @@ impl BatchExchange {
                     0.0
                 };
 
-                let profit_factor = if self.sum_losses[i] > 0.0 {
-                    self.sum_wins[i] / self.sum_losses[i]
-                } else if self.sum_wins[i] > 0.0 {
-                    f64::INFINITY
-                } else {
+                let profit_factor = if tc == 0 {
                     0.0
+                } else if self.sum_losses[i] > 0.0 {
+                    self.sum_wins[i] / self.sum_losses[i]
+                } else {
+                    f64::INFINITY
                 };
 
                 let (sharpe_ratio, sortino_ratio) = if tc >= 2 {
                     let n = tc as f64;
                     let mean = self.sum_returns[i] / n;
                     let variance = (self.sum_returns_sq[i] - n * mean * mean) / (n - 1.0);
-                    let std_dev = variance.max(0.0).sqrt();
-                    let sharpe = if std_dev < 1e-10 {
-                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
-                    } else {
-                        mean / std_dev
-                    };
-                    let downside_variance = self.sum_neg_returns_sq[i] / (n - 1.0);
-                    let downside_dev = downside_variance.sqrt();
-                    let sortino = if downside_dev < 1e-10 {
-                        if mean > 0.0 { f64::INFINITY } else { 0.0 }
-                    } else {
-                        mean / downside_dev
-                    };
-                    (sharpe, sortino)
+                    let std_dev = variance.max(0.0).sqrt().max(1e-4);
+                    let downside_dev = (self.sum_neg_returns_sq[i] / (n - 1.0)).sqrt().max(1e-4);
+                    (mean / std_dev, mean / downside_dev)
                 } else {
                     (0.0, 0.0)
                 };
@@ -414,8 +587,10 @@ impl BatchExchange {
                     final_balance: self.balance[i],
                     trade_count: tc,
                     winning_trades: self.winning_trades[i],
+                    losing_trades: self.losing_trades[i],
                     win_rate,
                     profit_factor,
+                    max_drawdown: self.max_drawdown_abs[i],
                     max_drawdown_pct: self.max_drawdown[i],
                     sharpe_ratio,
                     sortino_ratio,
@@ -432,7 +607,6 @@ impl BatchExchange {
         BatchDiagnostics { entries_active, positions_open }
     }
 
-    /// Estimated heap memory usage in bytes for all trial arrays.
     /// Publish this pass's indicator readings, in the order the batch declared
     /// its requests. Called by the driver before the per-trial loop, so every
     /// trial in the pass reads identical values.
@@ -455,18 +629,19 @@ impl BatchExchange {
         self.indicators.iter().all(|v| v.ready)
     }
 
+    /// Estimated heap memory usage in bytes for all trial arrays.
     pub fn estimated_ram_bytes(&self) -> usize {
         let n = self.n;
         let slots = n * self.max_positions;
         // Per-trial vectors (n elements each)
-        let per_trial_f64 = 4; // entry_price, pending_tp, pending_sl, balance
-        let per_trial_f64_metrics = 8; // total_pnl, sum_wins, sum_losses, sum_returns, sum_returns_sq, sum_neg_returns_sq, peak_equity, max_drawdown
-        let per_trial_u64 = 3; // entry_active_at, first_trade_at, last_trade_at
-        let per_trial_u32 = 2; // trade_count, winning_trades
-        let per_trial_u8 = 2; // active_count, entry_is_short
+        let per_trial_f64 = 8; // order_size, entry_price, pending_tp, pending_sl, live_price, live_tp, live_sl, balance
+        let per_trial_f64_metrics = 9; // total_pnl, sum_wins, sum_losses, sum_returns, sum_returns_sq, sum_neg_returns_sq, peak_equity, max_drawdown, max_drawdown_abs
+        let per_trial_u64 = 5; // sl_delay, busy_until, entry_active_at, first_trade_at, last_trade_at
+        let per_trial_u32 = 3; // trade_count, winning_trades, losing_trades
+        let per_trial_u8 = 3; // active_count, entry_is_short, unarmed
         // Per-slot vectors (n * max_positions elements each)
         let per_slot_f64 = 4; // pos_entry_price, pos_quantity, pos_tp_price, pos_sl_price
-        let per_slot_u64 = 1; // pos_sl_active_at
+        let per_slot_u64 = 2; // pos_tp_active_at, pos_sl_active_at
         let per_slot_u8 = 2; // pos_active, pos_is_short
 
         // Indicator readings are shared by all trials — a handful of values
@@ -484,7 +659,6 @@ impl BatchExchange {
             + indicator_bytes
     }
 
-    /// Reset all state for a new evaluation window.
     /// Reset all *trial* state for a new evaluation window (shadow mode).
     ///
     /// Deliberately leaves [`indicators`](Self::indicators) alone: they hold
@@ -499,17 +673,25 @@ impl BatchExchange {
         self.pending_sl_price.fill(0.0);
         self.entry_is_short.fill(false);
         self.entry_active_at.fill(0);
+        self.busy_until.fill(0);
+        self.unarmed.fill(0);
+        self.unarmed_total = 0;
+        self.live_price.fill(0.0);
+        self.live_tp_price.fill(0.0);
+        self.live_sl_price.fill(0.0);
         self.pos_active.fill(0);
         self.pos_entry_price.fill(0.0);
         self.pos_quantity.fill(0.0);
         self.pos_tp_price.fill(0.0);
         self.pos_sl_price.fill(0.0);
+        self.pos_tp_active_at.fill(0);
         self.pos_sl_active_at.fill(0);
         self.pos_is_short.fill(false);
         self.active_count.fill(0);
         self.balance.fill(self.initial_balance);
         self.trade_count.fill(0);
         self.winning_trades.fill(0);
+        self.losing_trades.fill(0);
         self.total_pnl.fill(0.0);
         self.sum_wins.fill(0.0);
         self.sum_losses.fill(0.0);
@@ -518,6 +700,7 @@ impl BatchExchange {
         self.sum_neg_returns_sq.fill(0.0);
         self.peak_equity.fill(self.initial_balance);
         self.max_drawdown.fill(0.0);
+        self.max_drawdown_abs.fill(0.0);
         self.first_trade_at.fill(0);
         self.last_trade_at.fill(0);
         self.total_entries = 0;

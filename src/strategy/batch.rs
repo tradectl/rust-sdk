@@ -14,7 +14,10 @@ use super::batch_exchange::BatchExchange;
 /// `const fn` can observe, so unlike the argument structs it cannot fold itself
 /// into [`super::abi::ABI_LAYOUT_FINGERPRINT`]. This constant does it by hand.
 /// Bump it in the same commit as any trait-method change, defaulted or not.
-pub const BATCH_TRAIT_REVISION: u32 = 3;
+///
+/// 4: no method changed, but the contract did: the driver now publishes each
+/// book ticker through [`BatchExchange::update_book`] before `process_ticker`.
+pub const BATCH_TRAIT_REVISION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Config + Result
@@ -26,20 +29,26 @@ pub struct BatchConfig {
     pub initial_balance: f64,
     pub taker_fee: f64,
     pub maker_fee: f64,
+    /// Extra slippage on stop exits, on top of the book price. 0 (the
+    /// default) prices a stop like the scalar engine: worst of the book side
+    /// and the trade print, nothing more.
     pub slippage_pct: f64,
     pub leverage: f64,
     /// Base simulated exchange round-trip latency in milliseconds (0 = instant).
     pub latency_ms: u64,
     /// Random jitter range in milliseconds. Actual latency = `latency_ms + rand(0, jitter_ms)`.
     pub jitter_ms: u64,
-    /// Stop-loss activation delay in milliseconds after entry fill.
-    /// Matches the live runner's SL_DELAY (typically 3000ms).
+    /// Stop-loss activation delay in milliseconds after entry fill, for
+    /// trials whose strategy does not set its own (`BatchExchange::sl_delay`).
     pub sl_delay_ms: u64,
     /// Market type — determines PnL calculation (linear vs inverse).
     pub market_type: MarketType,
     /// Contract size for inverse contracts (e.g. 10 for BNBUSD_PERP).
     /// Ignored for linear/spot.
     pub contract_size: f64,
+    /// Price tick for limit entries, like the scalar engine's `price_step`.
+    /// 0 = no rounding.
+    pub price_step: f64,
 }
 
 impl Default for BatchConfig {
@@ -48,13 +57,14 @@ impl Default for BatchConfig {
             initial_balance: 10_000.0,
             taker_fee: 0.0004,
             maker_fee: 0.0002,
-            slippage_pct: 0.0001,
+            slippage_pct: 0.0,
             leverage: 1.0,
             latency_ms: 0,
             jitter_ms: 0,
             sl_delay_ms: 0,
             market_type: MarketType::Linear,
             contract_size: 0.0,
+            price_step: 0.0,
         }
     }
 }
@@ -76,8 +86,12 @@ pub struct BatchResult {
     pub final_balance: f64,
     pub trade_count: u32,
     pub winning_trades: u32,
+    /// Trades that lost money. A flat trade is neither a win nor a loss.
+    pub losing_trades: u32,
     pub win_rate: f64,
     pub profit_factor: f64,
+    /// Largest fall from a peak of closed-trade equity, in money.
+    pub max_drawdown: f64,
     pub max_drawdown_pct: f64,
     pub sharpe_ratio: f64,
     pub sortino_ratio: f64,
@@ -118,6 +132,8 @@ pub trait BatchStrategy: Send {
     fn exchange_mut(&mut self) -> &mut BatchExchange;
 
     /// Process a book ticker event across all trials (strategy-specific).
+    /// The driver has already published this ticker through
+    /// [`BatchExchange::update_book`].
     fn process_ticker(&mut self, ticker: &TickerEvent);
 
     /// Indicators this batch needs — the SoA counterpart of
